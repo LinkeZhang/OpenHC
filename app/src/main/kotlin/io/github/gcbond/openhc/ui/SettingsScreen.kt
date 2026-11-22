@@ -17,16 +17,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.gcbond.openhc.BuildConfig
 import io.github.gcbond.openhc.R
 import io.github.gcbond.openhc.connection.ScreenSpec
+import io.github.gcbond.openhc.connection.BluetoothAddressCandidate
 import io.github.gcbond.openhc.settings.AppSettings
 
 /** 内容宽到这个值才排两列：两列各约 370dp 起，分段选择那排才放得下。 */
@@ -49,6 +55,7 @@ internal fun SettingsScreen(
     settings: AppSettings,
     screen: ScreenSpec,
     systemBluetoothAddress: String?,
+    onReadCandidates: () -> List<BluetoothAddressCandidate>,
     onBack: () -> Unit,
 ) {
     val wireless = rememberWirelessSettingsState()
@@ -90,13 +97,13 @@ internal fun SettingsScreen(
                                 }
                                 Spacer(Modifier.width(COLUMN_GAP))
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(sectionGap)) {
-                                    SettingsRightColumn(settings, systemBluetoothAddress, wireless)
+                                    SettingsRightColumn(settings, systemBluetoothAddress, onReadCandidates, wireless)
                                 }
                             }
                         } else {
                             Column(verticalArrangement = Arrangement.spacedBy(sectionGap)) {
                                 SettingsLeftColumn(settings, screen)
-                                SettingsRightColumn(settings, systemBluetoothAddress, wireless)
+                                SettingsRightColumn(settings, systemBluetoothAddress, onReadCandidates, wireless)
                             }
                         }
                         Text(
@@ -128,11 +135,12 @@ private fun SettingsLeftColumn(settings: AppSettings, screen: ScreenSpec) {
 private fun SettingsRightColumn(
     settings: AppSettings,
     systemBluetoothAddress: String?,
+    onReadCandidates: () -> List<BluetoothAddressCandidate>,
     wireless: WirelessSettingsState,
 ) {
     SettingsGroup(stringResource(R.string.settings_group_connection)) {
         WiredOnlySetting(wireless)
-        BluetoothAddressSection(settings, systemBluetoothAddress)
+        BluetoothAddressSection(settings, systemBluetoothAddress, onReadCandidates)
         LePairingSetting()
         AutoReconnectSetting(wireless)
         UsbAutoConnectSettingsSection()
@@ -140,6 +148,32 @@ private fun SettingsRightColumn(
     }
     BootStartSettingsSection(extraRows = { ConnectOnBluetoothSetting(wireless) })
     AudioSettingsSection()
+    DiagnosticSettingsSection()
+}
+
+/**
+ * 诊断：查看应用自己记的连接日志。
+ *
+ * 车机上普通应用读不到 logcat，所以日志由应用落盘；这里直接显示内容，能复制或分享，
+ * 不需要 adb，也不需要把车机连到电脑。
+ */
+@Composable
+private fun DiagnosticSettingsSection() {
+    var open by remember { mutableStateOf(false) }
+    SettingsGroup(stringResource(R.string.settings_group_diagnostic)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(stringResource(R.string.settings_log_open), style = UiType.rowTitle(LocalCompact.current), color = Palette.Text)
+                Text(
+                    stringResource(R.string.settings_log_summary),
+                    style = UiType.rowTitle(LocalCompact.current).copy(fontWeight = FontWeight.Normal),
+                    color = Palette.Muted,
+                )
+            }
+            ActionButton(stringResource(R.string.settings_log_open), onClick = { open = true })
+        }
+    }
+    if (open) DiagnosticLogDialog(onClose = { open = false })
 }
 
 /** 顶栏：「设置」、一句生效说明、右上「返回」。 */

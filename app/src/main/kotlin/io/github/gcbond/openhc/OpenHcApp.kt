@@ -2,6 +2,7 @@ package io.github.gcbond.openhc
 
 import android.app.Application
 import io.github.gcbond.openhc.connection.ConnectionController
+import io.github.gcbond.openhc.settings.DiagnosticLog
 import io.github.gcbond.openhc.startup.ProjectionSurfacer
 import io.github.gcbond.openhc.wireless.LePairingNames
 import io.github.gcbond.openhc.wireless.WirelessController
@@ -31,6 +32,8 @@ class OpenHcApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 诊断日志要尽早初始化：后面各层的连接日志都往这个文件里写。
+        DiagnosticLog.init(this)
         registerActivityLifecycleCallbacks(uiVisibility)
         // 有线开始时无线让出等回连，有线结束后无线再回到等待。
         connection.addHostListener {
