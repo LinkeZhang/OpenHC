@@ -100,6 +100,16 @@ class AudioPacket internal constructor(stream: AudioStreamInfo) {
     var route: AudioRoute = AudioRoute.MEDIA
         internal set
 
+    /**
+     * 这条声音流跨数据会话连续（鸿蒙 4.2 的控制连接私有帧）。
+     *
+     * 4.2 每 3 秒把数据会话拆掉、换个新 `DataSessionID` 重开，但声音其实是同一条流：
+     * 序号连着走、格式也没变。上层据此不按数据会话关播放器，否则每 3 秒重建一次、
+     * 重新攒起播缓冲，听起来就是「一段一段的，中间停一下」。
+     */
+    var continuous: Boolean = false
+        internal set
+
     fun copyPayload(): ByteArray = data.copyOfRange(offset, offset + length)
 
     override fun toString() =
@@ -232,9 +242,9 @@ sealed class AudioEvent {
     }
 
     /** 数据端口开好了，SETUP 已发。 */
-    class SetupSent(val stream: AudioStreamInfo, val port: Int, val cseq: Int, val codec: AudioCodec) : AudioEvent() {
+    class SetupSent(val stream: AudioStreamInfo, val port: Int, val cseq: Int, val wireCodec: Int) : AudioEvent() {
         override fun toString() =
-            "已发 SETUP（CSeq $cseq，${stream.transport.label}，Codec=${codec.wire}，client_port=$port--1），等手机应答和连入"
+            "已发 SETUP（CSeq $cseq，${stream.transport.label}，Codec=$wireCodec，client_port=$port--1），等手机应答和连入"
     }
 
     /** 开不了端口，没有发 SETUP。 */

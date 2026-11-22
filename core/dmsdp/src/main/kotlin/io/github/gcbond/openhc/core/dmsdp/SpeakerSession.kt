@@ -1,6 +1,7 @@
 package io.github.gcbond.openhc.core.dmsdp
 
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioCodec
+import io.github.gcbond.openhc.core.dmsdp.audio.AudioBus
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioDepacketizer
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioEndReason
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioEvent
@@ -19,6 +20,7 @@ import io.github.gcbond.openhc.core.dmsdp.audio.PcmVerdict
 import io.github.gcbond.openhc.core.dmsdp.audio.PhoneAudioFocus
 import io.github.gcbond.openhc.core.dmsdp.audio.PhoneRef
 import io.github.gcbond.openhc.core.dmsdp.audio.PhoneStateMessages
+import io.github.gcbond.openhc.core.dmsdp.audio.PrivateAudioFrames
 import io.github.gcbond.openhc.core.dmsdp.audio.SpeakerPlan
 
 /**
@@ -133,7 +135,11 @@ internal class SpeakerSession(
 
     /** 这条加密的文本消息归不归扬声器管：请求看 ServiceID，响应看 CSeq 是不是本机发出的 SETUP。 */
     fun accepts(message: DmsdpMessage): Boolean = if (message.isResponse) {
-        message.header(CSEQ)?.let { setups.containsKey(it) } == true
+        // 除了 CSeq 对得上的 SETUP 应答，也收带 `ServiceID: speaker1` 的应答：鸿蒙 4.2 有可能
+        // 用自己触发消息的 CSeq 回应，或带上服务标识但不回我们的 CSeq。交给 [onSetupAnswer] 记下来，
+        // 总比在日志里只留一句「手机没有应答 SETUP」好定位。
+        message.header(CSEQ)?.let { setups.containsKey(it) } == true ||
+            message.header(SERVICE_ID) == DmsdpConfig.SPEAKER_SERVICE_ID
     } else {
         message.header(SERVICE_ID) == DmsdpConfig.SPEAKER_SERVICE_ID
     }
@@ -225,6 +231,92 @@ internal class SpeakerSession(
         link.feed(data, offset, length)
     }
 
+    /**
+     * 控制连接上收到的私有音频帧（见 [PrivateAudioFrames]）。
+     *
+     * 鸿蒙 4.2 不连数据端口，SETUP 之后把 PCM 直接灌在控制连接上，一包 `##` 头 + 裸 PCM。
+     * 这些包以前被当成「不认识的二进制载荷」丢掉，表现就是投屏正常但一点声音都没有。
+     *
+     * 走和正常路径一样的播放链路（[AudioPacket] → [AudioStreamListener.onAudioPacket]），
+     * 所以下面的播放器、分路、字节序处理都不用改。
+     */
+    fun feedPrivateFrame(payload: ByteArray, offset: Int, length: Int, nowMillis: Long, out: DmsdpSession.Outputs) = using(out) {
+        // 手机每 3 秒拆一次数据会话、25ms 后再请求新的；这两者之间 current 是空的，
+        // 但控制连接上的声音没断过。用上一条流的信息接着放，别把这段丢掉（每 3 秒丢 25ms 听得出顿）。
+        val stream = current ?: privateStream
+        if (stream == null) return@using
+        // 数据端口已经连上时，声音走的是正常那条路，控制连接上的私有帧只是重复，丢掉。
+        if (stream.data != null) return@using
+        if (privateStream == null) privateStream = stream
+        val parser = privateFrames ?: PrivateAudioFrames().also {
+            privateFrames = it
+            note(
+                stream.info,
+                "手机没连数据端口，声音改从控制连接发（## 私有帧）；按裸 PCM 放",
+            )
+        }
+        val frameBytes = 2 * stream.info.channels.coerceAtLeast(1)
+        val frame = parser.parse(payload, offset, length, frameBytes)
+        if (frame == null) {
+            // 不是音频帧（例如 0x0301 流信息），或者短到装不下一帧 PCM：只记一条诊断，不当声音放。
+            if (parser.skipped == 1L) {
+                note(stream.info, "私有帧里混着非音频的帧（类型 0x%04x），已跳过".format(parser.type))
+            } else if (parser.odd == 1L) {
+                note(stream.info, "私有音频帧短到装不下一帧 PCM（$frameBytes 字节），已跳过")
+            }
+            return@using
+        }
+        // 每 500 包报一次构成：放了多少、跳了多少类型、多少包对不上帧头、裁过多少尾巴。
+        // 卡顿时先看这一行——包速率不够就是这里丢的。
+        if (parser.frames % 500L == 0L) {
+            note(
+                stream.info,
+                "私有帧统计：放 ${parser.frames} 包、非音频跳过 ${parser.skipped}、" +
+                    "帧头对不上 ${parser.bad}、剥组头 ${parser.stripped}、裁尾巴 ${parser.odd}、" +
+                    "序号跳变 ${parser.gaps}；类型 ${parser.typeHistogram()}",
+            )
+            // 第一次统计时把各类型的数据区头部打出来：确定它前面有没有元数据头。
+            if (parser.frames == 500L) note(stream.info, "私有帧各类型头部：${parser.headSamples()}")
+        }
+        if (parser.frames == 1L) {
+            emit(AudioEvent.FirstPacket(stream.info, PRIVATE_PAYLOAD_TYPE, frame.length))
+        }
+        val packet = privatePacket ?: AudioPacket(stream.info).also { privatePacket = it }
+        packet.stream = stream.info
+        packet.sequence = frame.sequence
+        packet.timestamp = 0
+        packet.ssrc = PRIVATE_SSRC
+        packet.payloadType = PRIVATE_PAYLOAD_TYPE
+        packet.marker = false
+        packet.bus = AudioBus.UNKNOWN
+        packet.usage = 0
+        packet.data = frame.data
+        packet.offset = frame.offset
+        packet.length = frame.length
+        packet.byteOrder = PcmByteOrder.LITTLE_ENDIAN
+        packet.playable = true
+        packet.codec = AudioCodec.PCM
+        packet.route = AudioRoute.MEDIA
+        // 鸿蒙 4.2 每 3 秒拆一次数据会话再换新号重开，但声音其实是同一条流。
+        // 标成连续的，上层就不会跟着数据会话关播放器（否则每 3 秒卡一下）。
+        packet.continuous = true
+        if (parser.frames == 1L) {
+            emit(AudioEvent.StreamRouted(stream.info, PRIVATE_SSRC, packet.bus, 0, AudioRoute.MEDIA))
+        }
+        check?.onPacket(packet.codec, packet.playable)?.let { verdict(it) }
+        guard("onAudioPacket") { listener.onAudioPacket(packet) }
+    }
+
+    /** 这次连接上控制通道里的私有音频帧；没出现过就是 null。 */
+    private var privateFrames: PrivateAudioFrames? = null
+    private var privatePacket: AudioPacket? = null
+
+    /**
+     * 控制连接私有帧用的那条流。手机每 3 秒换一个数据会话号，声音其实没断，
+     * 所以这里留着上一条，会话拆除到新的请求之间照样能放。
+     */
+    private var privateStream: Stream? = null
+
     fun onClosed(out: DmsdpSession.Outputs) = using(out) {
         val stream = current ?: return@using
         val link = stream.data ?: return@using
@@ -251,6 +343,9 @@ internal class SpeakerSession(
         when {
             trigger.equals(TRIGGER_OPTIONS, ignoreCase = true) -> onOptions(message, nowMillis)
             trigger.equals(TRIGGER_TEARDOWN, ignoreCase = true) -> onTeardown(message)
+            // 实测鸿蒙 4.2 在音频会话超时后会先发 TEARDOWN、紧接着再发 CLOSE。CLOSE 也必须回 200，
+            // 不回手机就一直等应答，下一轮要声音的节奏也被拖乱。
+            trigger.equals(TRIGGER_CLOSE, ignoreCase = true) -> onTeardown(message)
             trigger != null -> unhandled(message, "手机触发了没实现的数据会话操作「${trigger.take(32)}」，没有应答")
             message.header(AUDIO_PARAMETER) != null -> onAudioParameter(message)
             else -> unhandled(message, "扬声器服务的 SET_PARAMETER 没有触发字段，没有应答")
@@ -303,8 +398,22 @@ internal class SpeakerSession(
     }
 
     private fun onSetupAnswer(message: DmsdpMessage, nowMillis: Long) {
-        val cseq = message.header(CSEQ) ?: return
-        val stream = setups.remove(cseq) ?: return
+        val cseq = message.header(CSEQ)
+        if (cseq == null) {
+            note(current?.info, "手机的应答没有 CSeq，忽略（${message.startLine}）")
+            return
+        }
+        val stream = setups.remove(cseq)
+        if (stream == null) {
+            // 有应答、但 CSeq 对不上我们发出去的 SETUP。鸿蒙 4.2 可能回手机自己触发消息的 CSeq，
+            // 也可能是迟到的旧应答。原样记下来，否则日志里只会显示「手机没有应答 SETUP」，看不出它其实回了。
+            note(
+                current?.info,
+                "收到 CSeq $cseq 的应答，但不是我们发的 SETUP（在等：" +
+                    (setups.keys.sorted().joinToString("/").ifEmpty { "无" }) + "）：${message.startLine}",
+            )
+            return
+        }
         val after = if (stream.setupAtMillis >= 0) nowMillis - stream.setupAtMillis else -1
         stream.answer = message.startLine
         emit(AudioEvent.SetupAnswered(stream.info, message.startLine, message.statusCode, message.headers, after))
@@ -342,8 +451,27 @@ internal class SpeakerSession(
         val cseq = nextCSeq()
         setups[cseq.toString()] = stream
         stream.setupAtMillis = nowMillis
-        sendText(setupMessage(stream.info.dataSessionId, cseq, stream.port, stream.info.transport, stream.info.codec), target)
-        emit(AudioEvent.SetupSent(stream.info, stream.port, cseq, stream.info.codec))
+        val wireCodec = setupCodec(stream.info)
+        sendText(setupMessage(stream.info.dataSessionId, cseq, stream.port, stream.info.transport, wireCodec), target)
+        emit(AudioEvent.SetupSent(stream.info, stream.port, cseq, wireCodec))
+    }
+
+    /**
+     * SETUP 里 `Codec` 头写哪个数字。
+     *
+     * 两套编号对 PCM 不一致：2102 能力声明里 1 是 PCM（见 [DmsdpConfig.Speaker.audioProfile]），
+     * 而 SETUP 头里本实现按 [AudioCodec.wire] 写 0。参考实现只写自己的编号，在多数手机上能用，
+     * 但实测鸿蒙 4.2 会拿 `ParaAudio` 里的 `Codec=1` 和 SETUP 的 `Codec=0` 比，不一致就完全不理这条
+     * SETUP（不应答、也不连数据端口），3 秒超时 TEARDOWN，表现就是「投屏正常但车机一点声音都没有」。
+     *
+     * 所以声明 PCM、而手机在 `ParaAudio` 里要了别的号时，SETUP 回写手机要的那个号——语义仍是 PCM，
+     * 只是改用手机那套编号。手机没写 Codec、或声明的是 AAC 时，照旧按本端声明的编码。
+     * 实际解码仍按载荷判断（见 [AudioPacket.codec]），不受这里影响。
+     */
+    private fun setupCodec(info: AudioStreamInfo): Int {
+        val requested = info.requestedCodec
+        if (info.codec == AudioCodec.PCM && requested != null && requested != AudioCodec.PCM.wire) return requested
+        return info.codec.wire
     }
 
     private fun end(stream: Stream, reason: AudioEndReason) {
@@ -440,6 +568,7 @@ internal class SpeakerSession(
         const val TRIGGER_FIELD = "msdp_trigger_method"
         const val TRIGGER_OPTIONS = "OPTIONS"
         const val TRIGGER_TEARDOWN = "TEARDOWN"
+        const val TRIGGER_CLOSE = "CLOSE"
 
         /** 数据会话消息里扬声器的服务类型（服务声明里是 4，这里是 3）。 */
         const val DATA_SERVICE_TYPE = "3"
@@ -454,6 +583,13 @@ internal class SpeakerSession(
 
         /** 手机自报的名字最多留这么多字（只给应用显示用）。 */
         private const val MAX_NAME_CHARS = 40
+
+        /**
+         * 控制连接上私有音频帧用的假 SSRC / 载荷类型。私有帧里没有 RTP，也没有 SSRC，
+         * 但播放链路按 SSRC 分路、按载荷类型记日志，给个固定的占位值就行。
+         */
+        const val PRIVATE_SSRC = 0x0302_0001L
+        const val PRIVATE_PAYLOAD_TYPE = 0
 
         /** DataSessionID：十进制整数，可能带负号。 */
         private val SESSION_ID = Regex("-?[0-9]{1,19}")
@@ -474,7 +610,7 @@ internal class SpeakerSession(
          * CryptoVer、CryptoAbility、CryptoAlg、Fillp、（只有 TCP 时）TCP、Codec、Transport。
          * UDP 不写 `TCP: 0`，而是不带这个头；Transport 不管哪种方式都写 `RTP/AVP/UDP`。
          */
-        fun setupMessage(sessionId: String, cseq: Int, port: Int, transport: AudioTransport, codec: AudioCodec): ByteArray {
+        fun setupMessage(sessionId: String, cseq: Int, port: Int, transport: AudioTransport, wireCodec: Int): ByteArray {
             val headers = ArrayList<Pair<String, String>>(12)
             headers += SERVICE_ID to DmsdpConfig.SPEAKER_SERVICE_ID
             headers += SERVICE_TYPE to DATA_SERVICE_TYPE
@@ -486,7 +622,7 @@ internal class SpeakerSession(
             headers += "CryptoAlg" to "aes128-ctr"
             headers += "Fillp" to if (transport == AudioTransport.FILLP) "1" else "0"
             if (transport == AudioTransport.TCP) headers += "TCP" to "1"
-            headers += "Codec" to codec.wire.toString()
+            headers += "Codec" to wireCodec.toString()
             // 第二个口是 RTCP 口，必须写 -1（不建 RTCP）：手机建发送端前检查它小于 0，否则直接失败（-4），
             // 只写一个口也会被当成 0 而失败。
             headers += "Transport" to "RTP/AVP/UDP;unicast;client_port=$port--1"

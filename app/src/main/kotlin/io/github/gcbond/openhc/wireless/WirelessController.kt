@@ -6,7 +6,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -31,6 +30,7 @@ import io.github.gcbond.openhc.core.hisight.AccessUnitSink
 import io.github.gcbond.openhc.core.hisight.HiSightInput
 import io.github.gcbond.openhc.core.nearby.BleAdvertisement
 import io.github.gcbond.openhc.core.session.SessionEvent
+import io.github.gcbond.openhc.core.session.SessionLayer
 import io.github.gcbond.openhc.core.session.SocketRunner
 import io.github.gcbond.openhc.core.session.VideoParameters
 import io.github.gcbond.openhc.core.session.WirelessEvent
@@ -49,6 +49,7 @@ import io.github.gcbond.openhc.platform.wifi.WifiStatus
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
 import io.github.gcbond.openhc.settings.ClarityPreferences
+import io.github.gcbond.openhc.settings.DiagnosticLog
 import io.github.gcbond.openhc.settings.MediaKeyPreferences
 import io.github.gcbond.openhc.settings.WirelessNetworkPreferences
 import io.github.gcbond.openhc.settings.WirelessPreferences
@@ -430,18 +431,18 @@ class WirelessController(
                 return blocked(kind, WirelessNotice.IdentityInvalid(loaded.reason), AutoHold.IDENTITY_MISSING)
         }
         // 二维码、握手、认证里的车机身份都由它推出，必须是真实地址：读不到就只能让车主填。
-        val systemAddress = DeviceInfo.systemBluetoothAddress()
+        val systemAddress = DeviceInfo.systemBluetoothAddress(app)
         val bluetooth = BluetoothAddressPolicy.chooseForWireless(systemAddress, settings.manualBluetoothAddress)
         val address = bluetooth.address
             ?: return blocked(kind, WirelessNotice.BluetoothAddressMissing, AutoHold.BLUETOOTH_ADDRESS_MISSING)
-        // 无线用系统里读到的真实地址；手填的只在读不到时用。手填的像编出来的地址时，界面提醒一句。
-        val manual = BluetoothAddressPolicy.normalize(settings.manualBluetoothAddress)
-        if (bluetooth.source == BluetoothSource.SYSTEM_PROPERTY && manual != null && manual != address) {
-            Log.i(TAG, "手填的蓝牙地址和系统里读到的不同：无线用系统里的真实地址，手填的只用于有线")
+        // 手填的优先（车主照着「关于本机」填的一定是真的），系统读到的只在没填时兜底。两者不一致时记一笔：
+        // 说明系统里读到的那个值是错的，排查时有用。
+        if (bluetooth.source == BluetoothSource.MANUAL && systemAddress != null && systemAddress != address) {
+            Log.i(TAG, "手填的蓝牙地址和系统里读到的不一致，按手填的来（系统读到的是 $systemAddress）")
         }
         val addressMismatch = bluetooth.source == BluetoothSource.MANUAL && BluetoothAddressPolicy.isLocallyAdministered(address)
         if (addressMismatch) {
-            Log.w(TAG, "读不到系统里的蓝牙地址，用的是手填的；它像是编出来的地址，不是车机真实地址时扫码后不会有反应")
+            Log.w(TAG, "用的是手填的蓝牙地址；它像是编出来的地址，不是车机真实地址时扫码后不会有反应")
         }
         val adapter = BluetoothStatus.adapter(app)
             ?: return blocked(kind, WirelessNotice.BluetoothUnsupported, AutoHold.BLUETOOTH_OFF)
@@ -505,7 +506,7 @@ class WirelessController(
         attempt = current
         if (reconnect != null) triggers.commitDial(reconnect.address, SystemClock.elapsedRealtime())
         inputTarget = current
-        Log.i(
+        DiagnosticLog.log(
             TAG,
             "第 ${current.id} 次无线连接（${when (kind) { Kind.AUTO -> "等已配对的手机回连"; Kind.RECONNECT -> "车机主动回连"; Kind.MANUAL -> "用户开始" }}）：" +
                 "蓝牙地址来源 ${bluetooth.source}，deviceId ${config.deviceId.take(4)}…，" +
@@ -513,15 +514,22 @@ class WirelessController(
                 "已配对手机 ${trustStore.peerCount} 台，声音 ${audio ?: "关"}，" +
                 "广播 ${beacon?.let { "开（重新发布 ${it.republishMillis / 1000} 秒，GATT ${if (it.gatt) "开" else "关"}${if (it.declareRandomAddress) "，声明随机地址" else ""}）" } ?: "不发"}",
         )
-        Log.i(TAG, "第 ${current.id} 次无线连接的清晰度：${clarity.key}，声明码率 ${VideoClarity.describe(config.display.bitrate)}")
+        DiagnosticLog.log(TAG, "第 ${current.id} 次无线连接的清晰度：${clarity.key}，声明码率 ${VideoClarity.describe(config.display.bitrate)}")
         setAutoHold(null)
-        apply(WirelessSignal.AttemptStarted(current.id, addressMismatch, autoReconnect = kind == Kind.AUTO))
+        apply(
+            WirelessSignal.AttemptStarted(
+                current.id,
+                addressMismatch,
+                autoReconnect = kind == Kind.AUTO,
+                bluetoothAddress = address,
+                bluetoothSource = bluetooth.source,
+            ),
+        )
         current.runner.start()
         watchTermination(current)
     }
 
-    private fun granted(permission: String) =
-        ContextCompat.checkSelfPermission(app, permission) == PackageManager.PERMISSION_GRANTED
+    private fun granted(permission: String) = WirelessPermissionCheck.granted(app, permission)
 
     /** 开始不了：回到空闲，显示原因。 */
     private fun block(notice: WirelessNotice) {
@@ -758,7 +766,7 @@ class WirelessController(
     private fun reconnectConditions(forDial: Boolean = false): ReconnectPolicy.Conditions {
         val adapter = BluetoothStatus.adapter(app)
         val sdk = Build.VERSION.SDK_INT
-        val address = BluetoothAddressPolicy.chooseForWireless(DeviceInfo.systemBluetoothAddress(), settings.manualBluetoothAddress).address
+        val address = BluetoothAddressPolicy.chooseForWireless(DeviceInfo.systemBluetoothAddress(app), settings.manualBluetoothAddress).address
         return ReconnectPolicy.Conditions(
             enabled = forDial || wirelessPrefs.connectOnBluetooth,
             wiredOnly = wirelessPrefs.wiredOnly,
@@ -957,7 +965,16 @@ class WirelessController(
 
     /** 会话事件（TCP 段与认证），在协议线程上。 */
     private fun onProtocolEvent(current: Attempt, event: SessionEvent) {
-        if (event is SessionEvent.Diagnostic) Log.d(TAG, "[${current.id}] $event") else Log.i(TAG, "[${current.id}] $event")
+        if (event is SessionEvent.Diagnostic) {
+            Log.d(TAG, "[${current.id}] $event")
+            // DMSDP 层的诊断（手机回了什么、没认出来的消息、SETUP 应答原文）必须落盘：
+            // 车机读不到 logcat，只有写进诊断文件用户才能发出来。其它层的诊断量大、多为过程噪声，
+            // 仍旧只进 logcat。
+            if (event.layer == SessionLayer.DMSDP) DiagnosticLog.log(TAG, "[${current.id}] $event")
+        } else {
+            Log.i(TAG, "[${current.id}] $event")
+            DiagnosticLog.log(TAG, "[${current.id}] $event")
+        }
         // 在协议线程上同步建好解码器：之后的帧也在这个线程上送，保证第一帧到时解码器已经接上。
         if (event is SessionEvent.VideoNegotiated) prepareDecoder(current, event.video)
         post { onSessionEvent(current, event) }
@@ -966,6 +983,7 @@ class WirelessController(
     /** 无线事件，在协议线程上（经执行器转来）。 */
     private fun onWirelessEvent(current: Attempt, event: WirelessEvent) {
         Log.i(TAG, "[${current.id}] $event")
+        DiagnosticLog.log(TAG, "[${current.id}] $event")
         // 结束原因按发生的先后记，不等调度线程排到。
         if (event is WirelessEvent.Ended) current.causes.onSessionEnded(event.reason)
         post {

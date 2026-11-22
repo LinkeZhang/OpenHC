@@ -53,7 +53,10 @@ class SpeakerSessionTest {
         override fun onAudioPacket(packet: AudioPacket) {
             packets += packet.copyPayload()
             routes += packet.bus to packet.route
+            continuous += packet.continuous
         }
+
+        val continuous = ArrayList<Boolean>()
 
         inline fun <reified T : AudioEvent> only(): T = events.filterIsInstance<T>().single()
     }
@@ -237,16 +240,55 @@ class SpeakerSessionTest {
         assertEquals(2, audio.only<AudioEvent.SetupSent>().cseq)
     }
 
+    /**
+     * 第七处故意差异：声明 PCM 时，SETUP 的 `Codec` 头跟随手机在 `ParaAudio` 里给的号。
+     *
+     * 参考实现固定写本端的 `AudioCodec.wire`（PCM 是 0）。实测鸿蒙 4.2 请求
+     * `ParaAudio=SampleRate=48000;Format=16;ChannelNum=2;Codec=1` 时收到 `Codec: 0` 的 SETUP 完全不回应：
+     * 不应答 SETUP、也不连数据端口，3 秒后 TEARDOWN，表现是「投屏正常但车机没有声音」。
+     * 2102 能力声明里 1 就是 PCM（见 [DmsdpConfig.Speaker.audioProfile]），所以这里回写手机那套编号。
+     */
+    @Test
+    fun setupCodecFollowsThePhoneRequestWhenDeclaringPcm() {
+        val audio = AudioRecorder()
+        val session = speakerSession(speaker = DmsdpConfig.Speaker(codec = AudioCodec.PCM), audio = audio)
+        session.phoneDeviceInfo()
+        session.speakerProfile()
+        val body = "msdp_trigger_method: OPTIONS\r\n"
+        session.feed(
+            DmsdpChannel.CONTROL,
+            phone.encryptedText(
+                "SET_PARAMETER * DMSDP/1.0\r\ncseq: 5\r\nserviceid: speaker1\r\nservicetype: 3\r\n" +
+                    "datasessionid: 592827640\r\nsimple: 1\r\n" +
+                    "paraaudio: SampleRate=48000;Format=16;ChannelNum=2;Codec=1\r\n" +
+                    "content-length: ${body.length}\r\n\r\n" + body,
+            ),
+            1_000,
+        )
+        assertEquals(1, audio.only<AudioEvent.Requested>().stream.requestedCodec)
+        val setup = text(session.audioListenersReady(40100, 1_050).single())
+        assertTrue("Codec: 1\r\n" in setup, "SETUP 的 Codec 跟随手机请求：$setup")
+        assertEquals(1, audio.only<AudioEvent.SetupSent>().wireCodec)
+
+        // 手机没写 Codec：仍按本端声明的编码（PCM -> 0）。
+        val plain = AudioRecorder()
+        val second = speakerSession(speaker = DmsdpConfig.Speaker(codec = AudioCodec.PCM), audio = plain)
+        second.phoneDeviceInfo()
+        second.speakerProfile()
+        second.feed(DmsdpChannel.CONTROL, trigger("OPTIONS"), 1_000)
+        assertTrue("Codec: 0\r\n" in text(second.audioListenersReady(40100, 1_050).single()), "没写 Codec 时按声明")
+    }
+
     @Test
     fun setupHeadersFollowTransportAndCodec() {
-        fun setup(transport: AudioTransport, codec: AudioCodec) =
-            String(SpeakerSession.setupMessage("-3", 9, 20000, transport, codec))
+        fun setup(transport: AudioTransport, wireCodec: Int) =
+            String(SpeakerSession.setupMessage("-3", 9, 20000, transport, wireCodec))
         val prefix = "SETUP * DMSDP/1.0\r\nServiceID: speaker1\r\nServiceType: 3\r\nDataSessionID: -3\r\nCSeq: 9\r\nSimple: 1\r\n" +
             "CryptoVer: 1\r\nCryptoAbility: 222\r\nCryptoAlg: aes128-ctr\r\n"
         val transport = "Transport: RTP/AVP/UDP;unicast;client_port=20000--1\r\n\r\n"
-        assertEquals(prefix + "Fillp: 0\r\nTCP: 1\r\nCodec: 0\r\n" + transport, setup(AudioTransport.TCP, AudioCodec.PCM))
-        assertEquals(prefix + "Fillp: 0\r\nCodec: 1\r\n" + transport, setup(AudioTransport.UDP, AudioCodec.AAC), "UDP 不带 TCP 头")
-        assertEquals(prefix + "Fillp: 1\r\nCodec: 0\r\n" + transport, setup(AudioTransport.FILLP, AudioCodec.PCM))
+        assertEquals(prefix + "Fillp: 0\r\nTCP: 1\r\nCodec: 0\r\n" + transport, setup(AudioTransport.TCP, 0))
+        assertEquals(prefix + "Fillp: 0\r\nCodec: 1\r\n" + transport, setup(AudioTransport.UDP, 1), "UDP 不带 TCP 头")
+        assertEquals(prefix + "Fillp: 1\r\nCodec: 0\r\n" + transport, setup(AudioTransport.FILLP, 0))
     }
 
     @Test
@@ -607,5 +649,128 @@ class SpeakerSessionTest {
         assertEquals(0, audio.only<AudioEvent.Ended>().summary.setupPort)
         // 之后开好的端口没人要：要求关掉。
         assertIs<DmsdpAction.CloseAudioTransport>(session.audioListenersReady(40100, 0).single())
+    }
+
+    /** 真机（v16/v17 日志）里的 `##` 私有帧：18 字节头 + 1400 字节裸 PCM。 */
+    private fun privateFrame(sequence: Int, firstData: Int = 0, secondData: Int = 0): ByteArray {
+        val head = "2323886d03fedcba03020000" + "%08x".format(sequence) + "0578"
+        val header = head.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val payload = ByteArray(18 + 1400)
+        System.arraycopy(header, 0, payload, 0, header.size)
+        payload[18] = firstData.toByte()
+        payload[19] = secondData.toByte()
+        return payload
+    }
+
+    /**
+     * 真机里的组头帧：类型 0x0301，数据区前 24 字节是元数据，后面才是 PCM。
+     *
+     * 数据区开头（v21 日志实测）：
+     * `03 03 | 09 32 69 7a | 00 00 00 01 | 00 00 00 08 | 00 00 20 12 | 00 00 00 00 | 00 00`
+     * 其中 `0x2012 = 8210 = 1400×5 + 1210`，是同组 6 包的声明长度之和。
+     */
+    private fun groupHeaderFrame(sequence: Int = 0): ByteArray {
+        val head = "2323886d03fedcba03010000" + "%08x".format(sequence) + "0578"
+        val header = head.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val payload = ByteArray(18 + 1400)
+        System.arraycopy(header, 0, payload, 0, header.size)
+        val meta = "03030932697a000000010000000800002012000000000000"
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        System.arraycopy(meta, 0, payload, 18, meta.size)
+        return payload
+    }
+
+    /**
+     * 类型 0x0301 也是音频，要放；但它的 24 字节组头不是声音，必须剥掉。
+     *
+     * 早先误以为整个 0x0301 都是「流信息」而跳过，结果每 6 包丢 1 包（v20 日志里
+     * `非音频跳过 100` 对应 `0x0301×100`），带宽只剩 156 KiB/s，播放器持续欠载。
+     * v21 改成整包放，结果每 42.5ms 把 6 帧元数据当声音播一次 —— 真机听感是「有规律的咔、咔」。
+     */
+    @Test
+    fun the0301TypeIsAudioTooButItsGroupHeaderIsStripped() {
+        val audio = AudioRecorder()
+        val session = toSetupSent(audio)
+
+        session.feed(DmsdpChannel.CONTROL, phone.encryptedFrame(groupHeaderFrame()), 1_100)
+        assertEquals(1, audio.packets.size, "0x0301 也要当声音放")
+        assertEquals(1376, audio.packets[0].size, "剥掉 24 字节组头后放 1376 字节")
+        assertTrue(
+            audio.events.filterIsInstance<AudioEvent.Note>().none { "非音频" in it.message },
+            "不该再报「非音频」：${audio.events.filterIsInstance<AudioEvent.Note>()}",
+        )
+    }
+
+    /**
+     * 鸿蒙 4.2 不连数据端口，SETUP 之后把 PCM 直接灌在控制连接上（`##` 私有帧）。
+     *
+     * 这些包以前被当成「不认识的二进制载荷」丢掉，表现是投屏正常但一点声音都没有。
+     * 现在要能从控制连接上认出来、当裸 PCM 交给播放链路。
+     */
+    @Test
+    fun privateFramesOnTheControlChannelArePlayedAsPcm() {
+        val audio = AudioRecorder()
+        val session = toSetupSent(audio)
+        assertIs<AudioEvent.SetupSent>(audio.events.last(), "先走到 SETUP 已发")
+
+        session.feed(DmsdpChannel.CONTROL, phone.encryptedFrame(privateFrame(1, 0x01, 0x7F)), 1_100)
+        session.feed(DmsdpChannel.CONTROL, phone.encryptedFrame(privateFrame(2, 0x02, 0x7F)), 1_101)
+
+        assertEquals(2, audio.packets.size, "两包都要交给播放链路")
+        assertEquals(1400, audio.packets[0].size, "去掉 18 字节帧头后是裸 PCM")
+        assertEquals(0x01, audio.packets[0][0].toInt(), "载荷原样交出")
+        assertEquals(0x7F, audio.packets[0][1].toInt() and 0xFF)
+        // 标成连续流：上层据此不按数据会话关播放器（4.2 每 3 秒换一次会话号）。
+        assertTrue(audio.continuous.all { it }, "控制连接的私有帧都是连续流")
+
+        // 不再当成「不认识的二进制载荷」。
+        assertTrue(audio.events.none { it is AudioEvent.FramingUnknown }, "不该再报认不出分帧")
+        // 第一包要出一条「手机改从控制连接发声音」的诊断。
+        assertTrue(
+            audio.events.filterIsInstance<AudioEvent.Note>().any { "控制连接" in it.message },
+            "要提示手机改走控制连接：${audio.events.filterIsInstance<AudioEvent.Note>()}",
+        )
+    }
+
+    /**
+     * 手机拆除会话、还没请求新的之间（真机上约 25ms），控制连接上的声音没断，不能丢。
+     *
+     * 鸿蒙 4.2 每 3 秒拆一次会话再换号重开。拆除之后 `current` 是空的，
+     * 如果这时直接返回，每 3 秒就丢 25ms 音频，听得出顿。
+     */
+    @Test
+    fun privateFramesKeepPlayingBetweenTeardownAndTheNextRequest() {
+        val audio = AudioRecorder()
+        val session = toSetupSent(audio)
+        session.feed(DmsdpChannel.CONTROL, phone.encryptedFrame(privateFrame(1, 0x01, 0x7F)), 1_100)
+        assertEquals(1, audio.packets.size)
+
+        // 手机拆除当前会话：current 变空。
+        session.feed(DmsdpChannel.CONTROL, trigger("TEARDOWN", cseq = "6"), 1_200)
+
+        // 新的请求还没来，控制连接上的音频照常到：必须继续放。
+        session.feed(DmsdpChannel.CONTROL, phone.encryptedFrame(privateFrame(2, 0x03, 0x7F)), 1_210)
+        assertEquals(2, audio.packets.size, "拆除到下次请求之间的音频不能丢")
+        assertEquals(0x03, audio.packets[1][0].toInt())
+    }
+
+    /**
+     * 手机只是应答了 SETUP（200）但没连数据端口时，声音照样从控制连接取。
+     *
+     * 这是鸿蒙 4.2 的常态：它连 200 都不回。判据只能是「数据端口有没有连上」（[SpeakerSession.Stream.data]），
+     * 不能是「有没有应答」——只看应答会把 4.2 的声音丢掉。
+     */
+    @Test
+    fun privateFramesStillPlayWhenThePhoneAnsweredButNeverConnectedTheDataPort() {
+        val audio = AudioRecorder()
+        val session = toSetupSent(audio)
+        session.feed(
+            DmsdpChannel.CONTROL,
+            phone.encryptedText("DMSDP/1.0 200 OK\r\nCSeq: 2\r\nServiceID: speaker1\r\n\r\n"),
+            1_060,
+        )
+        session.feed(DmsdpChannel.CONTROL, phone.encryptedFrame(privateFrame(1, 0x01, 0x7F)), 1_100)
+
+        assertEquals(1, audio.packets.size, "只应答、没连端口，声音还是要从控制连接取")
     }
 }

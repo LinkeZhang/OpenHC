@@ -286,7 +286,7 @@ class ConnectionController(context: Context) {
         } catch (e: IOException) {
             return block(Notice.TrustStoreUnavailable(e.message ?: e.javaClass.simpleName))
         }
-        val bluetooth = BluetoothAddressPolicy.choose(DeviceInfo.systemBluetoothAddress(), settings.manualBluetoothAddress)
+        val bluetooth = BluetoothAddressPolicy.choose(DeviceInfo.systemBluetoothAddress(app), settings.manualBluetoothAddress)
         val fullScreen = settings.fullScreen
         val display = try {
             DisplayPlan.resolve(DisplayArea.screenFor(app, fullScreen), ResolutionChoice.Auto, settings.fps)

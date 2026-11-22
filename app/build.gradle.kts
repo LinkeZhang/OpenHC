@@ -45,8 +45,10 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         // versionCode = 主版本 × 10000 + 次版本 × 100 + 补丁号。
-        versionCode = 200
-        versionName = "0.2.0"
+        // 这个分支是「0.2.0 + 鸿蒙 4.2/低版本适配」的合并版，加 50 跟上游 0.2.0 区分开，
+        // 装到车机上时一眼能看出跑的是哪个包。
+        versionCode = 250
+        versionName = "0.2.0-harmony42"
     }
 
     sourceSets {

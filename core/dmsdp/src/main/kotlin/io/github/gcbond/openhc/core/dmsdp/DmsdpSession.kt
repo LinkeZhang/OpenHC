@@ -6,6 +6,7 @@ import io.github.gcbond.openhc.core.dmsdp.audio.CarAudioFocus
 import io.github.gcbond.openhc.core.dmsdp.audio.MicStreamListener
 import io.github.gcbond.openhc.core.dmsdp.audio.PhoneAudioFocus
 import io.github.gcbond.openhc.core.dmsdp.audio.PhoneStateMessages
+import io.github.gcbond.openhc.core.dmsdp.audio.PrivateAudioFrames
 import kotlinx.serialization.json.JsonPrimitive
 import java.security.SecureRandom
 
@@ -81,6 +82,7 @@ class DmsdpSession(
     private var unrecognizedPayloads = 0
     private var controlState = ControlState.NOT_CONNECTED
     private var nextCSeq = 1
+
     private var tcpKeepAlive: TcpKeepAlive? = null
     private var udpKeepAlive: UdpKeepAlive? = null
 
@@ -439,8 +441,17 @@ class DmsdpSession(
             for (record in DeviceRecords.parseAll(payload)) onDeviceRecord(record, nowMillis, out)
             return
         }
+        // 加密后的控制连接上，手机除了文本消息还会发**二进制**载荷。其中最重要的一种是音频：
+        // 鸿蒙 4.2 在音频 SETUP 之后不连数据端口，而是把 PCM 直接灌在这里（`##` 私有帧，见
+        // PrivateAudioFrames）——这些包以前被当成「不认识的二进制」丢掉，表现就是投屏正常但完全没声音。
+        // 必须先认它，否则下面的「认不出就跳过」会把它一并跳过。
+        if (speaker != null && PrivateAudioFrames.isPrivateFrame(payload, 0, payload.size)) {
+            audioQuietly(out) { speaker.feedPrivateFrame(payload, 0, payload.size, nowMillis, out) }
+            return
+        }
+        // 其它认不出的二进制块（`$` 设备记录已在上面的分支处理掉了）。
+        // 不是文本协议，本层不解析，但也不能让整条会话作废——那会把投屏直接断掉。
         if (!DmsdpMessage.looksLikeText(payload)) {
-            // 手机的声音数据连接还没连上时，会先经控制连接送声音（不是 '$' 记录，格式还没弄清）：跳过，不断开。
             unrecognizedPayloads++
             if (unrecognizedPayloads <= UNRECOGNIZED_REPORTED || unrecognizedPayloads % UNRECOGNIZED_REPORT_EVERY == 0) {
                 val head = payload.copyOf(minOf(payload.size, DmsdpEvent.UnrecognizedControlPayload.HEAD_BYTES))

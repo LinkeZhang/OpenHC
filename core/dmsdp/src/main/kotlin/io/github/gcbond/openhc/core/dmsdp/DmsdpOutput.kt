@@ -127,7 +127,24 @@ sealed class DmsdpEvent : DmsdpOutput {
      * （例如数据会话的 `SET_PARAMETER`）、手机的响应，以及格式不符合保活/时间同步要求的同名请求。
      */
     class UnhandledControlMessage(val message: DmsdpMessage) : DmsdpEvent() {
-        override fun toString() = "UnhandledControlMessage(${message.startLine})"
+        /**
+         * 带上全部头部和正文摘要：鸿蒙 4.2 在音频 SETUP 后不回 200 时，很可能回了一条我们没认出来的
+         * 消息（错误应答、CSeq 对不上的应答）。只写首行的话，日志里看不出它到底回了什么。
+         */
+        override fun toString(): String {
+            val head = message.headers.joinToString("；") { "${it.first}: ${it.second.take(MAX_VALUE_CHARS)}" }
+            val body = if (message.bodySize == 0) {
+                ""
+            } else {
+                "；正文 ${message.bodySize} 字节：${String(message.body, Charsets.ISO_8859_1).take(MAX_BODY_CHARS)}"
+            }
+            return "UnhandledControlMessage(${message.startLine}；$head$body)"
+        }
+
+        private companion object {
+            const val MAX_VALUE_CHARS = 120
+            const val MAX_BODY_CHARS = 160
+        }
     }
 
     /**

@@ -9,7 +9,6 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
-import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import io.github.gcbond.openhc.MainActivity
@@ -17,6 +16,7 @@ import io.github.gcbond.openhc.connection.UsbAutoConnect
 import io.github.gcbond.openhc.platform.usb.PhoneUsbMode
 import io.github.gcbond.openhc.platform.usb.UsbDescriber
 import io.github.gcbond.openhc.settings.WirelessPreferences
+import io.github.gcbond.openhc.wireless.WirelessPermissionCheck
 import io.github.gcbond.openhc.wireless.WirelessPermissions
 
 /**
@@ -82,9 +82,7 @@ internal object BootStart {
     /** 无线等回连要的运行时权限都有（开始无线连接必须的，加上发 BLE 广播的）。 */
     fun wirelessPermissionsGranted(context: Context): Boolean {
         val sdk = Build.VERSION.SDK_INT
-        val granted = { permission: String ->
-            ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
-        }
+        val granted = { permission: String -> WirelessPermissionCheck.granted(context, permission) }
         return WirelessPermissions.missing(sdk, granted).isEmpty() && WirelessPermissions.advertise(sdk).all(granted)
     }
 
@@ -111,11 +109,15 @@ internal object BootStart {
         }
     }
 
-    /** 有悬浮窗权限（安卓 10 起开机时打开界面要它）。 */
-    fun canDrawOverlays(context: Context): Boolean = try {
-        Settings.canDrawOverlays(context)
-    } catch (e: RuntimeException) {
+    /** 有悬浮窗权限（安卓 10 起开机时打开界面要它）。安卓 6.0 以前没有这个接口，按没有算（那时也不需要它）。 */
+    fun canDrawOverlays(context: Context): Boolean = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
         false
+    } else {
+        try {
+            Settings.canDrawOverlays(context)
+        } catch (e: RuntimeException) {
+            false
+        }
     }
 
     /** 本应用的悬浮窗权限页。 */

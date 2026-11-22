@@ -1,7 +1,7 @@
 package io.github.gcbond.openhc.audio
 
 import android.content.Context
-import android.util.Log
+
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioCodec
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioEndReason
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioEvent
@@ -19,6 +19,7 @@ import io.github.gcbond.openhc.platform.media.AudioPlayer
 import io.github.gcbond.openhc.platform.media.AudioTuning
 import io.github.gcbond.openhc.platform.media.AudioUsage
 import io.github.gcbond.openhc.settings.AudioPreferences
+import io.github.gcbond.openhc.settings.DiagnosticLog
 import java.io.Closeable
 import java.util.EnumMap
 
@@ -62,6 +63,12 @@ internal class AudioOutput(
     private var closed = false
     private var muted = 0L
 
+    /**
+     * 一路声音的键。
+     *
+     * [dataSessionId] 为 [CONTINUOUS_SESSION] 表示这是跨数据会话连续的一条流（鸿蒙 4.2 的控制连接私有帧）：
+     * 手机每 3 秒拆一次数据会话换新号，但声音是连着的一条，不能跟着会话拆播放器。
+     */
     private data class StreamKey(val dataSessionId: String, val ssrc: Long, val route: AudioRoute)
 
     /** 一路声音。[sounding] 跟着播放器的「开始出声 / 放空」走，焦点按它算这个用途还在不在响。 */
@@ -72,7 +79,7 @@ internal class AudioOutput(
         private var finished = false
 
         override fun onAudioPlayerEvent(event: AudioPlayer.Event) {
-            Log.i(TAG, "[$attemptId] ${label()}播放器：$event")
+            DiagnosticLog.log(TAG, "[$attemptId] ${label()}播放器：$event")
             when (event) {
                 is AudioPlayer.Event.Started, is AudioPlayer.Event.Resumed -> sound(true)
                 is AudioPlayer.Event.Starved -> sound(false)
@@ -104,7 +111,7 @@ internal class AudioOutput(
     }
 
     override fun onAudioEvent(event: AudioEvent) {
-        Log.i(TAG, "[$attemptId] $event")
+        DiagnosticLog.log(TAG, "[$attemptId] $event")
         capture()?.onEvent(event)
         when (event) {
             is AudioEvent.PhoneFocus -> onPhoneFocus(event.message)
@@ -119,13 +126,15 @@ internal class AudioOutput(
             }
             is AudioEvent.PhoneVoiceState -> focusController()?.assistantStateChanged(event.active)
             is AudioEvent.StreamRouted ->
-                if (event.unknownUsage) Log.w(TAG, "[$attemptId] SSRC ${event.ssrc} 带的用途 ${event.usage} 不认识，按媒体放")
+                if (event.unknownUsage) DiagnosticLog.log(TAG, "[$attemptId] SSRC ${event.ssrc} 带的用途 ${event.usage} 不认识，按媒体放")
             is AudioEvent.CodecVerdict -> onVerdict(event)
             is AudioEvent.Ended -> {
                 stopSession(event.stream.dataSessionId, "数据会话结束（${event.reason.label}）")
                 // 手机拆掉数据会话就是不放了：焦点一并放掉（通话中的通话焦点除外），它重新出声时会再要；被新的替换时不放。
+                // 连续流（4.2 控制连接私有帧）只是换了个会话号，声音还在，不能放焦点——否则车机会停掉别的声音、
+                // 我们 25ms 后再申请回来，听起来又是一下顿。
                 if (event.reason == AudioEndReason.PEER_TEARDOWN || event.reason == AudioEndReason.LISTEN_FAILED) {
-                    synchronized(lock) { focus }?.dataSessionEnded()
+                    if (!hasContinuousStream()) synchronized(lock) { focus }?.dataSessionEnded()
                 }
             }
             is AudioEvent.PeerClosed -> stopSession(event.stream.dataSessionId, "数据连接断开")
@@ -152,7 +161,7 @@ internal class AudioOutput(
             if (closed) return
             if (!packet.playable) {
                 muted++
-                if (muted == 1L) Log.w(TAG, "[$attemptId] 载荷不像声音（多半还有一层没解开），静音不放；看分帧识别的日志和抓包")
+                if (muted == 1L) DiagnosticLog.log(TAG, "[$attemptId] 载荷不像声音（多半还有一层没解开），静音不放；看分帧识别的日志和抓包")
                 return
             }
             val stream = streamFor(packet, stale) ?: return
@@ -166,7 +175,7 @@ internal class AudioOutput(
             stream.packets++
             if (stream.packets % STATS_EVERY == 0L) {
                 val underruns = target.trackUnderruns?.let { "，音轨欠载 $it 次" } ?: ""
-                Log.i(
+                DiagnosticLog.log(
                     TAG,
                     "[$attemptId] ${stream.label()}已送进播放器 ${stream.packets} 包（静音 $muted）；${target.latency ?: "延迟还没测到"}；" +
                         "起播压回丢 ${target.startTrimmedMillis}ms，削峰丢 ${target.trimmedMillis}ms（${target.trimmedChunks} 块），" +
@@ -221,7 +230,7 @@ internal class AudioOutput(
         }
 
         override fun onLog(message: String) {
-            Log.i(TAG, "[$attemptId] $message")
+            DiagnosticLog.log(TAG, "[$attemptId] $message")
         }
 
         override fun onMediaFocus(held: Boolean) {
@@ -263,7 +272,7 @@ internal class AudioOutput(
             event.verdict.failure -> "连续不出声 ${record.failures} 次，出过声的手机要连续 2 次才改用 AAC"
             else -> "记下：这台手机能用 PCM"
         }
-        Log.i(TAG, "[$attemptId] $phone：${event.verdict.label}；$outcome")
+        DiagnosticLog.log(TAG, "[$attemptId] $phone：${event.verdict.label}；$outcome")
     }
 
     /**
@@ -272,7 +281,7 @@ internal class AudioOutput(
      */
     private fun streamFor(packet: AudioPacket, stale: MutableList<Stream>): Stream? {
         val info = packet.stream
-        val key = StreamKey(info.dataSessionId, packet.ssrc, packet.route)
+        val key = StreamKey(keySessionId(packet), packet.ssrc, packet.route)
         streams[key]?.let { existing ->
             if (existing.player.format.encoding == encodingOf(packet.codec)) return existing
             streams.remove(key)
@@ -293,7 +302,7 @@ internal class AudioOutput(
         stream.player = AudioPlayer(format, stream, tuning, usage)
         volumes[usage]?.let { stream.player.setVolume(it) }
         streams[key] = stream
-        Log.i(
+        DiagnosticLog.log(
             TAG,
             "[$attemptId] 建播放器：${stream.label()}，$format，音轨用途 ${usage.label}" +
                 "（按载荷判断是 ${packet.codec.label}，声明的是 ${info.codec.label}）；$tuning",
@@ -303,11 +312,38 @@ internal class AudioOutput(
 
     private fun unsupported(stream: AudioStreamInfo, why: String): Stream? {
         unsupportedSessions += stream.dataSessionId
-        Log.w(TAG, "[$attemptId] 放不了这次的声音：$why")
+        DiagnosticLog.log(TAG, "[$attemptId] 放不了这次的声音：$why")
         return null
     }
 
+    /**
+     * 播放器用哪个键。连续流（鸿蒙 4.2 控制连接私有帧）用一个固定键，不跟数据会话号走——
+     * 手机每 3 秒换一次会话号，跟着走就会每 3 秒关掉播放器重建一次。
+     */
+    private fun keySessionId(packet: AudioPacket): String =
+        if (packet.continuous) CONTINUOUS_SESSION else packet.stream.dataSessionId
+
+    /**
+     * 现在有没有连续声音流（鸿蒙 4.2 控制连接私有帧）。
+     *
+     * 有的话，数据会话拆除只是换号，焦点不能放——放了车机会停掉别的声音，
+     * 我们 25ms 后再申请回来，听起来就是一下顿。
+     */
+    private fun hasContinuousStream(): Boolean = synchronized(lock) {
+        streams.keys.any { it.dataSessionId == CONTINUOUS_SESSION }
+    }
+
+    /**
+     * 停掉一个数据会话的播放器。
+     *
+     * [dataSessionId] 是连续流的固定键时不停——那条流还在，只是手机换了个会话号。
+     * 连续流真正结束（整个连接结束、[close]）时才由 [close] 统一关。
+     */
     private fun stopSession(dataSessionId: String, why: String) {
+        if (dataSessionId == CONTINUOUS_SESSION) {
+            DiagnosticLog.log(TAG, "[$attemptId] 数据会话换号（$why），连续的声音流不停，播放器留着")
+            return
+        }
         val stopped = synchronized(lock) {
             val gone = streams.values.filter { it.key.dataSessionId == dataSessionId }
             for (stream in gone) streams.remove(stream.key)
@@ -315,12 +351,19 @@ internal class AudioOutput(
         }
         for (stream in stopped) {
             stream.finish()
-            Log.i(TAG, "[$attemptId] 关播放器：${stream.label()}，$why")
+            DiagnosticLog.log(TAG, "[$attemptId] 关播放器：${stream.label()}，$why")
         }
     }
 
     private companion object {
         const val TAG = "OpenHC-Audio"
+
+        /**
+         * 连续声音流的固定键（鸿蒙 4.2 控制连接私有帧）。
+         *
+         * 不会和手机的 `DataSessionID` 撞：那个是十进制数字，这个是带前缀的字符串。
+         */
+        const val CONTINUOUS_SESSION = "continuous-control-audio"
 
         /** 每一路每这么多包记一行统计（媒体 AAC 约 10 秒）。 */
         const val STATS_EVERY = 500L

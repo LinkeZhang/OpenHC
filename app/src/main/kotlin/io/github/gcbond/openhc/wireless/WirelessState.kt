@@ -1,5 +1,6 @@
 package io.github.gcbond.openhc.wireless
 
+import io.github.gcbond.openhc.connection.BluetoothSource
 import io.github.gcbond.openhc.connection.ConnectionReducer
 import io.github.gcbond.openhc.connection.ConnectionSignal
 import io.github.gcbond.openhc.connection.ConnectionUiState
@@ -91,9 +92,17 @@ sealed class WirelessNotice {
         override fun toString() = "BluetoothOff"
     }
 
-    /** 车机系统是安卓 8.0 以下，没有本地热点：用不了无线连接。 */
+    /** 车机系统是安卓 5.0 以下，没有可用的开热点接口：用不了无线连接。 */
     object HotspotUnsupported : WirelessNotice() {
         override fun toString() = "HotspotUnsupported"
+    }
+
+    /**
+     * 安卓 6～7 用旧接口开热点要「修改系统设置」：它不在运行时弹窗里，要去系统设置页打开。
+     * 界面显示这条时已经同时拉起了那个页面。
+     */
+    object WriteSettingsRequired : WirelessNotice() {
+        override fun toString() = "WriteSettingsRequired"
     }
 
     /**
@@ -136,6 +145,9 @@ sealed class WirelessSignal {
         val attempt: Int,
         val addressMismatch: Boolean = false,
         val autoReconnect: Boolean = false,
+        /** 这次二维码里用的车机蓝牙地址，以及它是手填的还是系统读到的。 */
+        val bluetoothAddress: String? = null,
+        val bluetoothSource: BluetoothSource? = null,
     ) : WirelessSignal()
 
     /** 开始不了（条件不满足），回到空闲。 */
@@ -184,6 +196,10 @@ data class WirelessUiState(
      * 直接连车机蓝牙，不是车机真实地址时扫码后不会有反应，界面上提醒一句。
      */
     val addressMismatch: Boolean = false,
+    /** 这次二维码里用的车机蓝牙地址（没有二维码时为 null）。 */
+    val bluetoothAddress: String? = null,
+    /** 上面那个地址是手填的还是系统读到的；null = 还没有地址。 */
+    val bluetoothSource: BluetoothSource? = null,
     /** 这次连接是自动进入的「等已配对的手机回连」（同时也显示二维码，新手机照样能扫）。 */
     val autoReconnect: Boolean = false,
     /** 这次连接里 BLE 广播的情况；没发广播为 null。 */
@@ -223,6 +239,8 @@ object WirelessReducer {
             attempt = signal.attempt,
             active = true,
             addressMismatch = signal.addressMismatch,
+            bluetoothAddress = signal.bluetoothAddress,
+            bluetoothSource = signal.bluetoothSource,
             projection = ConnectionReducer.reduce(ConnectionUiState(), ConnectionSignal.AttemptStarted(signal.attempt)),
             autoReconnect = signal.autoReconnect,
             // 自动回到等待时留着上一次的结束原因，看得出刚才为什么断了。
