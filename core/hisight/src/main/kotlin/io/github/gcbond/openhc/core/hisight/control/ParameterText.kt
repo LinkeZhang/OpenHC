@@ -21,6 +21,9 @@ internal object ParameterText {
 
     const val TRIGGER = "his_trigger_method"
 
+    /** 模块路由字段名：带它的 SET_PARAMETER 是发给某个子模块的，不是能力协商。 */
+    const val MODULE_ID = "module_id"
+
     fun lines(body: ByteArray): List<String> {
         if (body.isEmpty()) return emptyList()
         for (b in body) {
@@ -53,19 +56,84 @@ internal object ParameterText {
         return names
     }
 
-    /** SET 的键值；名字转小写，未知或重复的名字都拒绝，值去掉两端空格和 TAB。 */
+    /**
+     * SET 的键值；名字转小写，值去掉两端空格和 TAB。
+     *
+     * 名字校验分三档：
+     * - 已知字段（[CAPABILITY_FIELDS]、[METADATA_FIELDS]、[TRIGGER]）：收下来；
+     * - `his_` 开头的其它名字：这是手机侧的扩展能力（例如鸿蒙 4.2 的「智慧聆听」会带上本端没声明的字段），
+     *   识别但**不使用**，直接跳过——拒绝只会让这类手机连不上；
+     * - 其余名字：格式不明，仍然拒绝。
+     *
+     * 缺少冒号的行一律拒绝：那是真拆错了，容忍下来会把正文拼歪。
+     */
     fun parameters(body: ByteArray): Map<String, String> {
         val result = LinkedHashMap<String, String>()
         for (line in lines(body)) {
             val colon = line.indexOf(':')
-            val name = (if (colon >= 0) line.substring(0, colon) else line).lowercase()
+            if (colon < 0) {
+                throw MalformedMessageException("能力参数缺少冒号（出错行：${lineExcerpt(line)}）")
+            }
+            val name = line.substring(0, colon).lowercase()
             val known = name in CAPABILITY_FIELDS || name in METADATA_FIELDS || name == TRIGGER
-            if (colon < 0 || !known || name in result) {
-                throw MalformedMessageException("能力参数缺少冒号、名字未知或重复")
+            if (name in result) {
+                throw MalformedMessageException("能力参数名字重复（出错行：${lineExcerpt(line)}）")
+            }
+            if (!known) {
+                // 本端没用到的 his_ 扩展字段：跳过，不参与后续校验。
+                if (isExtensionName(name)) continue
+                throw MalformedMessageException("能力参数名字未知（出错行：${lineExcerpt(line)}）")
             }
             result[name] = trimSpaceTab(line.substring(colon + 1))
         }
         return result
+    }
+
+    /**
+     * 正文里的模块路由号：手机用 `module_id: 1001` 这种写法把一条 SET_PARAMETER 指定给某个子模块
+     * （实测鸿蒙 4.2 的「智慧聆听」用 1001）。带这个字段的请求不是能力协商，不能按能力选择去校验。
+     *
+     * 返回 null 表示正文里没有 `module_id` 行。只看第一处出现，值原样返回（不做数字校验：
+     * 本端不实现任何子模块，具体是几都不影响处理方式）。
+     */
+    fun routedModuleId(body: ByteArray): String? {
+        val text = try {
+            String(body, Charsets.US_ASCII)
+        } catch (e: RuntimeException) {
+            return null
+        }
+        for (line in text.split('\n')) {
+            val trimmed = line.trim()
+            val colon = trimmed.indexOf(':')
+            if (colon < 0) continue
+            if (trimmed.substring(0, colon).trim().lowercase() == MODULE_ID) {
+                return trimmed.substring(colon + 1).trim()
+            }
+        }
+        return null
+    }
+
+    /** `his_` 开头、只含小写字母数字下划线的名字，视为手机侧扩展能力。 */
+    /**
+     * 手机侧扩展字段：`his_` 开头、只含小写字母数字下划线的名字，以及模块路由字段 `module_id`。
+     * 这些本端都用不到，识别但跳过。
+     */
+    private fun isExtensionName(name: String): Boolean =
+        name == MODULE_ID ||
+            (name.length > 4 && name.startsWith("his_") &&
+                name.all { it in 'a'..'z' || it in '0'..'9' || it == '_' })
+
+    /** 出错提示里附上出错行原文：只留可打印 ASCII，控制字符写成点，超长截断。 */
+    private fun lineExcerpt(line: String): String {
+        val out = StringBuilder()
+        for (c in line) {
+            if (out.length >= 120) {
+                out.append("...")
+                break
+            }
+            out.append(if (c in ' '..'~') c else '.')
+        }
+        return if (out.isEmpty()) "空" else out.toString()
     }
 
     /**

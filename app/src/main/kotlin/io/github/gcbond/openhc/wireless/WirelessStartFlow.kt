@@ -4,14 +4,12 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.WirelessPreferences
 
@@ -36,9 +34,16 @@ internal class WirelessStartFlow(
     /** 「开始无线连接」。 */
     fun start() {
         val sdk = Build.VERSION.SDK_INT
-        // 只用数据线连接开着、或系统太老开不了本地热点：不用申请任何权限，交给调度直接说明原因。
+        // 只用数据线连接开着、或系统太老开不了热点：不用申请任何权限，交给调度直接说明原因。
         if (wirelessPrefs.wiredOnly || !WirelessNetworkPlan.hotspotSupported(sdk)) {
             controller().start()
+            return
+        }
+        // 安卓 6～7 用旧接口开热点要「修改系统设置」：它不在运行时弹窗里，只能拉起系统设置页让用户打开。
+        if (WirelessPermissions.needsWriteSettings(sdk) && !canWriteSettings()) {
+            Log.i(TAG, "安卓 8.0 以下开热点要「修改系统设置」：拉起系统设置页")
+            controller().reportBlocked(WirelessNotice.WriteSettingsRequired)
+            openWriteSettings()
             return
         }
         val missing = WirelessPermissions.missing(sdk, ::granted)
@@ -85,6 +90,26 @@ internal class WirelessStartFlow(
     }
 
     /**
+     * 打开「修改系统设置」的系统设置页（安卓 6～7 用旧接口开热点要它）。
+     * 系统没有这个页面时退到本应用的设置页。
+     */
+    fun openWriteSettings() {
+        val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.fromParts("package", activity.packageName, null))
+        try {
+            activity.startActivity(intent)
+        } catch (e: ActivityNotFoundException) {
+            Log.w(TAG, "系统没有「修改系统设置」页，退到应用设置页")
+            openAppSettings()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "打不开「修改系统设置」页：${e.message}")
+            openAppSettings()
+        }
+    }
+
+    /** 现在有没有「修改系统设置」（appop，见 [WirelessPermissionCheck]）。 */
+    private fun canWriteSettings(): Boolean = WirelessPermissionCheck.canWriteSettings(activity)
+
+    /**
      * 请系统打开蓝牙（系统弹框）。安卓 12 起要先有「附近的设备」权限：没有就先走 [start] 申请。
      * 车机系统没有这个页面时只记日志，界面上的提示仍然让用户自己去打开。
      */
@@ -108,8 +133,7 @@ internal class WirelessStartFlow(
         }
     }
 
-    private fun granted(permission: String) =
-        ContextCompat.checkSelfPermission(activity, permission) == PackageManager.PERMISSION_GRANTED
+    private fun granted(permission: String) = WirelessPermissionCheck.granted(activity, permission)
 
     private companion object {
         const val TAG = "OpenHC-Wireless"

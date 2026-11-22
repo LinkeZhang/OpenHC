@@ -28,7 +28,41 @@ data class BluetoothChoice(val address: String?, val source: BluetoothSource)
  * 之前的配对记录对不上，要重新输入连接码。
  */
 object BluetoothAddressPolicy {
+    /** 最常用的那个属性名，保留给文档和旧代码引用。 */
     const val SYSTEM_PROPERTY_KEY = "persist.sys.bt_addr"
+
+    /**
+     * 车机可能用来存本机蓝牙地址的系统属性名，按可靠性从高到低排。
+     * 各家方案商写法不同（高通、联发科、瑞芯微、比亚迪、长城等都有各自的），全部试一遍。
+     */
+    val PROPERTY_KEYS = listOf(
+        "persist.sys.bt_addr",
+        "persist.vendor.bt.bdaddr",
+        "persist.bluetooth.bdaddr",
+        "ro.bt.bdaddr_path_addr",
+        "persist.service.bdroid.bdaddr",
+        "ro.boot.btmacaddr",
+        "net.hostname.bt",
+        "persist.sys.bt.mac",
+        "ro.bt.bdaddr",
+        "bluetooth.address",
+        "persist.bt.mac",
+        "ro.bt.mac",
+        "ro.bluetooth.address",
+        "ro.vendor.bt.bdaddr",
+        "persist.radio.btmacaddr",
+        "persist.vendor.qcom.bluetooth.bdaddr",
+        "bt_mac",
+        "ro.product.bt.address",
+    )
+
+    /** Settings.Global / Settings.Secure 里可能存着本机蓝牙地址的键。 */
+    val SETTINGS_KEYS = listOf(
+        "bluetooth_address",
+        "bluetooth_addr",
+        "bt_address",
+        "bt_mac_address",
+    )
 
     /** 全 0、全 F：属性没初始化或读错了。 */
     private val INVALID = setOf("00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF", BluetoothAddress.UNAVAILABLE)
@@ -40,12 +74,17 @@ object BluetoothAddressPolicy {
     }
 
     /**
-     * 无线连接用的地址：系统里读到的优先，读不到才用手填的。二维码里的地址手机要拿去直接连车机蓝牙，
-     * 必须是车机真实地址；有线那边手填优先（可以借它换一个身份），无线不行。
+     * 无线连接用的地址：**手填的优先**，没填才用系统里读到的。
+     *
+     * 为什么手填优先：从系统读地址本来就没有可靠办法（安卓 6 起公开接口一律给占位值），只能碰运气去猜厂商写在哪个
+     * 属性里。猜错了会读到一个**看起来合法但其实是别的设备**的地址，二维码里就带着错地址，手机拿去连车机蓝牙永远
+     * 连不上，车机这边只停在「等扫码」、不报任何错——这比读不到更难查。
+     *
+     * 所以让车主手填的地址压过系统读到的值：车主照着「关于本机」填的那一份一定是真的。系统读到的值只在没填时兜底。
      */
     fun chooseForWireless(systemProperty: String?, manual: String?): BluetoothChoice {
-        normalize(systemProperty)?.let { return BluetoothChoice(it, BluetoothSource.SYSTEM_PROPERTY) }
         normalize(manual)?.let { return BluetoothChoice(it, BluetoothSource.MANUAL) }
+        normalize(systemProperty)?.let { return BluetoothChoice(it, BluetoothSource.SYSTEM_PROPERTY) }
         return BluetoothChoice(null, BluetoothSource.UNAVAILABLE)
     }
 

@@ -68,6 +68,12 @@ class HiSightReceiver(
     private var started = false
     private var cryptoReady = false
     private var optionsReceived = false
+
+    /**
+     * 这台手机在控制连接上实际发过哪些请求（按顺序，去重），只用来在出错提示里说明「走到哪一步」。
+     * 鸿蒙各版本走的步骤并不一致，有这个才不用抓包就能判断卡在哪。
+     */
+    private val seenRequests = ArrayList<String>()
     private var lastCseq = 0
     private var setup: MediaSetup? = null
     private var videoConnected = false
@@ -248,13 +254,15 @@ class HiSightReceiver(
             handleResponse(message, out)
             return
         }
-        when (RtspParser.requestMethod(message.firstLine)) {
+        val method = RtspParser.requestMethod(message.firstLine)
+        if (method !in seenRequests) seenRequests += method
+        when (method) {
             "ANNOUNCE" -> handleAnnounce(message, out, wallClockMillis)
             "OPTIONS" -> handleOptions(message, out, wallClockMillis)
             "GET_PARAMETER" -> handleGetParameter(message, out)
             "SET_PARAMETER" -> handleSetParameter(message, out, wallClockMillis)
             // PAUSE、手机直接发的 TEARDOWN 等请求不在已知的交互里，不猜应答。
-            else -> throw MalformedMessageException("收到未实现的控制请求")
+            else -> throw MalformedMessageException("收到未实现的控制请求（已收到：${trace()}）")
         }
     }
 
@@ -268,38 +276,94 @@ class HiSightReceiver(
         }
     }
 
-    /** 手机的 ANNOUNCE 只能选 aes128ctr / version 1；明文回 200 之后两个方向都切到 AES-CTR。 */
+    /**
+     * 手机的 ANNOUNCE 选定加密方式；明文回 200 之后两个方向都切到 AES-CTR。
+     *
+     * 各家手机系统的写法并不一致（鸿蒙 4.2 和 HarmonyOS NEXT 就不同），所以只校验真正决定加密结果的
+     * 那两件事，不限制行的数量与行尾写法：
+     * 1. 能找到 `encrypt_description: …` 这一行（行尾 CRLF、裸 LF、裸 CR 都认，前后允许多余空行）；
+     *    有的系统干脆省掉这个前缀，那就退一步按整个正文找字段。
+     * 2. 里面 `encrypt_list` 含 `aes128ctr`、`version` 是 `1`（`1.0` 也认）。
+     * 行里附带的其他字段、值两端的引号一律忽略，不因为写法不同就断开。
+     */
     private fun handleAnnounce(message: RtspMessage, out: MutableList<HiSightOutput>, wallClockMillis: Long) {
-        if (cryptoReady || !message.isTextParameters) {
-            throw MalformedMessageException("ANNOUNCE 重复或类型不是 text/parameters")
-        }
+        if (cryptoReady) throw MalformedMessageException("ANNOUNCE 重复")
         if (message.body.any { it < 0 }) throw MalformedMessageException("加密选择正文含非 ASCII 字节")
         val text = String(message.body, Charsets.US_ASCII)
-        if (!text.endsWith("\r\n") || countCrlf(text) != 1) throw MalformedMessageException("加密选择必须是单独一行")
-        val line = text.substring(0, text.length - 2)
-        val colon = line.indexOf(':')
-        if (colon < 0 || line.substring(0, colon) != "encrypt_description") {
-            throw MalformedMessageException("加密选择缺少 encrypt_description")
+        val fields = LinkedHashMap<String, String>()
+        collectFields(encryptDescriptionValue(text) ?: text, fields)
+        val list = fields["encrypt_list"]
+            ?: throw MalformedMessageException("加密选择里没有 encrypt_list（正文：${excerpt(text)}）")
+        if (list.split(',', ' ', '\t', ';').none { it.equals("aes128ctr", ignoreCase = true) }) {
+            throw MalformedMessageException("加密选择里没有 aes128ctr（正文：${excerpt(text)}）")
         }
-        val fields = HashMap<String, String>()
-        for (item in ParameterText.trimSpaceTab(line.substring(colon + 1)).split(";")) {
-            val eq = item.indexOf('=')
-            val name = if (eq >= 0) item.substring(0, eq) else item
-            if (eq < 0 || name in fields) throw MalformedMessageException("加密选择字段缺失或重复")
-            fields[name] = item.substring(eq + 1)
-        }
-        if (fields.keys != setOf("encrypt_list", "version") ||
-            fields.getValue("encrypt_list").lowercase() != "aes128ctr" || fields["version"] != "1"
-        ) {
-            throw MalformedMessageException("只支持 aes128ctr / version 1 的加密选择")
+        val version = fields["version"]
+            ?: throw MalformedMessageException("加密选择缺少 version（正文：${excerpt(text)}）")
+        if (version != "1" && version != "1.0") {
+            throw MalformedMessageException("只支持 version 1 的加密选择（正文：${excerpt(text)}）")
         }
         out += sendControl(RtspTemplates.ok(message.cseq, date(wallClockMillis)))
         cryptoReady = true
     }
 
+    /** 把 `名字=值;名字=值` 收进 [fields]；名字转小写，值去掉两端空白和成对引号，重名的保留第一个。 */
+    private fun collectFields(text: String, fields: MutableMap<String, String>) {
+        for (item in text.split(';', '\r', '\n')) {
+            val eq = item.indexOf('=')
+            if (eq <= 0) continue
+            val name = ParameterText.trimSpaceTab(item.substring(0, eq)).lowercase()
+            if (name.isEmpty() || name in fields) continue
+            fields[name] = unquote(ParameterText.trimSpaceTab(item.substring(eq + 1)))
+        }
+    }
+
+    private fun unquote(value: String): String {
+        if (value.length >= 2 && (value.first() == '"' || value.first() == '\'') && value.last() == value.first()) {
+            return value.substring(1, value.length - 1)
+        }
+        return value
+    }
+
+    /** 找出 `encrypt_description: …` 这一行的值；行尾 CRLF、裸 LF、裸 CR 都认。 */
+    private fun encryptDescriptionValue(text: String): String? {
+        var start = 0
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '\r' || c == '\n') {
+                encryptDescriptionIn(text.substring(start, i))?.let { return it }
+                if (c == '\r' && i + 1 < text.length && text[i + 1] == '\n') i++
+                start = i + 1
+            }
+            i++
+        }
+        return encryptDescriptionIn(text.substring(start))
+    }
+
+    private fun encryptDescriptionIn(line: String): String? {
+        val trimmed = ParameterText.trimSpaceTab(line)
+        val colon = trimmed.indexOf(':')
+        if (colon <= 0) return null
+        if (ParameterText.trimSpaceTab(trimmed.substring(0, colon)).lowercase() != "encrypt_description") return null
+        return trimmed.substring(colon + 1)
+    }
+
+    /** 出错时附在提示里的正文摘要：只留可见 ASCII、过长截断。加密选择里只有算法名，不含密钥。 */
+    private fun excerpt(text: String): String {
+        val out = StringBuilder()
+        for (c in text) {
+            if (out.length >= 120) {
+                out.append("...")
+                break
+            }
+            out.append(if (c in ' '..'~') c else '.')
+        }
+        return if (out.isEmpty()) "空" else out.toString()
+    }
+
     private fun handleOptions(message: RtspMessage, out: MutableList<HiSightOutput>, wallClockMillis: Long) {
         if (!cryptoReady || message.body.isNotEmpty() || optionsReceived) {
-            throw MalformedMessageException("OPTIONS 早于加密协商、带正文或重复")
+            throw MalformedMessageException("OPTIONS 早于加密协商、带正文或重复（已收到：${trace()}）")
         }
         val date = date(wallClockMillis)
         out += sendControl(RtspTemplates.ok(message.cseq, date, withPublic = true))
@@ -317,6 +381,14 @@ class HiSightReceiver(
     }
 
     private fun handleSetParameter(message: RtspMessage, out: MutableList<HiSightOutput>, wallClockMillis: Long) {
+        // 带 module_id 的 SET_PARAMETER 是手机发给某个子模块的（实测鸿蒙 4.2 的「智慧聆听」用 1001），
+        // 不是能力协商。本端不实现任何子模块，但**必须回 200**：不回手机就会一直等，最后把整条投屏断掉。
+        // 回 200 只是让手机继续走，本端不解析也不启用任何对应功能。
+        val routed = ParameterText.routedModuleId(message.body)
+        if (routed != null) {
+            out += sendControl(RtspTemplates.ok(message.cseq, date(wallClockMillis)))
+            return
+        }
         val fields = ParameterText.parameters(message.body)
         val trigger = fields[ParameterText.TRIGGER]
         if (trigger == "TEARDOWN") {
@@ -402,12 +474,21 @@ class HiSightReceiver(
         out += HiSightOutput.Ended(reason)
     }
 
+    /**
+     * 能力请求的前提只有「加密已协商好」。
+     *
+     * 原来还要求必须先收到 OPTIONS，但鸿蒙 4.2 实测不先发 OPTIONS 就查能力；OPTIONS 那一步只是互相
+     * 告知支持的方法，跳过它不影响加密和能力协商的结果，所以不再强制，收到就应答、没收到也不拦。
+     */
     private fun requireNegotiationReady(message: RtspMessage) {
-        if (!cryptoReady || !optionsReceived) throw MalformedMessageException("能力请求早于加密与 OPTIONS 协商")
+        if (!cryptoReady) throw MalformedMessageException("能力请求早于加密协商（已收到：${trace()}）")
         if (message.body.isNotEmpty() && !message.isTextParameters) {
-            throw MalformedMessageException("能力正文缺少 text/parameters 类型")
+            throw MalformedMessageException("能力正文缺少 text/parameters 类型（已收到：${trace()}）")
         }
     }
+
+    /** 已收到的请求序列，出错提示里用来说明走到哪一步。 */
+    private fun trace(): String = if (seenRequests.isEmpty()) "只有应答" else seenRequests.joinToString(" → ")
 
     private fun sendControl(text: String): HiSightOutput.Send {
         val plain = text.toByteArray(Charsets.US_ASCII)
@@ -424,16 +505,6 @@ class HiSightReceiver(
     private fun nextCseq(): Int = ++lastCseq
 
     private fun date(wallClockMillis: Long) = RtspTemplates.date(wallClockMillis, timeZone)
-
-    private fun countCrlf(text: String): Int {
-        var count = 0
-        var i = text.indexOf("\r\n")
-        while (i >= 0) {
-            count++
-            i = text.indexOf("\r\n", i + 2)
-        }
-        return count
-    }
 
     private fun checkRange(data: ByteArray, offset: Int, length: Int) {
         require(offset >= 0 && length >= 0 && offset + length <= data.size) { "范围非法" }

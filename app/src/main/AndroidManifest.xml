@@ -44,6 +44,14 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!--
+        安卓 8.0 以下没有「只供本地通信」的热点，只能用隐藏接口 setWifiApEnabled 开普通个人热点。
+        安卓 6.0～7.1 的系统在这个调用里还要求 WRITE_SETTINGS（appop），只能由用户在系统设置页打开；
+        安卓 5.x 上它是安装即授予。新版本不用这个接口，也不会去申请它。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="32" />

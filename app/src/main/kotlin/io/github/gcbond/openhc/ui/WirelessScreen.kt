@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.gcbond.openhc.R
+import io.github.gcbond.openhc.connection.BluetoothSource
 import io.github.gcbond.openhc.wireless.WirelessNotice
 import io.github.gcbond.openhc.wireless.WirelessPhase
 import io.github.gcbond.openhc.wireless.WirelessUiState
@@ -112,6 +113,30 @@ private fun ColumnScope.ScanContent(state: WirelessUiState, qr: String, actions:
     }
     if (state.addressMismatch) {
         Text(stringResource(R.string.wireless_warning_manual_address), style = UiType.hint, color = Palette.Warn)
+    }
+    // 二维码里带的车机蓝牙地址：手机就是拿它去连车机的。地址错了手机永远连不上，而车机这边只会一直停在
+    // 「等扫码」、不报任何错，所以必须明明白白写在界面上，车主能一眼对照「关于本机」核对。
+    state.bluetoothAddress?.let { address ->
+        Text(
+            stringResource(
+                if (state.bluetoothSource == BluetoothSource.MANUAL) {
+                    R.string.wireless_address_used_manual
+                } else {
+                    R.string.wireless_address_used_system
+                },
+                address,
+            ),
+            style = UiType.hint,
+            color = Palette.Muted,
+            textAlign = TextAlign.Center,
+        )
+        // 手机一直「连接中」最后失败、车机这边毫无动静，最常见的病因就是二维码里这个地址不对。
+        Text(
+            stringResource(R.string.wireless_address_check_hint),
+            style = UiType.hint,
+            color = Palette.Muted,
+            textAlign = TextAlign.Center,
+        )
     }
     state.notice?.let {
         Text(wirelessNoticeText(it), style = UiType.hint, color = Palette.Warn, modifier = Modifier.padding(top = 4.dp))

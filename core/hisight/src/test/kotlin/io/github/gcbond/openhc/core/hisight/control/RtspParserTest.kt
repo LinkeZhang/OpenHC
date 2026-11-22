@@ -44,6 +44,28 @@ class RtspParserTest {
 
     private var stricter = 0
 
+    /**
+     * 第六处故意差异：没有结尾空行的 GET_PARAMETER 保活，Date 可以带真实时间。
+     *
+     * 参考实现只认 `Date:` 为空的那一种。实测鸿蒙 4.2 在投屏中暂停播放时会发
+     * `GET_PARAMETER rtsp://localhost/hisight1.1 RTSP/1.0\r\nDate: <时间>\r\nCSeq: 7\r\n`（没有空行），
+     * 严格按参考实现会在这里断开投屏。
+     *
+     * 判定条件：首行是 `GET_PARAMETER rtsp://…`、只有 Date/CSeq 两个头、没有多余字节。
+     */
+    private fun isKeepAliveWithDateWithoutBlankLine(payload: ByteArray): Boolean {
+        val text = String(payload, Charsets.US_ASCII)
+        if (!text.startsWith("GET_PARAMETER rtsp://")) return false
+        val lines = text.split("\r\n")
+        // 末尾的 CRLF 会切出一个空串，去掉它之后不能还有空行。
+        val body = if (lines.isNotEmpty() && lines.last().isEmpty()) lines.dropLast(1) else lines
+        if (body.size != 3) return false
+        if (body.any { it.isEmpty() }) return false
+        val dateLine = body[1].lowercase()
+        val cseqLine = body[2].lowercase()
+        return dateLine.startsWith("date:") && cseqLine.startsWith("cseq:")
+    }
+
     /** 参考实现接受、本实现拒绝时，必须是头部区域含控制字符这一种情况。 */
     private fun assertStricter(payload: ByteArray, bodyStart: Int, error: MalformedMessageException, label: String) {
         assertEquals("控制消息头含控制字符", error.message, "$label：拒绝原因不是控制字符")
@@ -73,6 +95,8 @@ class RtspParserTest {
                     assertStricter(payload, entry.int("bodyStart"), outcome.error, label)
                 }
                 is Outcome.Accepted -> {
+                    // 第六处故意差异：带真实 Date、没有结尾空行的 GET_PARAMETER 保活。
+                    if (!entry.bool("ok") && isKeepAliveWithDateWithoutBlankLine(payload)) continue
                     assertTrue(entry.bool("ok"), "$label：参考实现拒绝的报文被接受了")
                     val m = outcome.message
                     assertEquals(entry.str("first"), m.firstLine, label)
@@ -120,6 +144,8 @@ class RtspParserTest {
                 assertStricter(payload, expected.substringAfter('/').toInt(), outcome.error, label)
             }
             is Outcome.Accepted -> {
+                // 第六处故意差异：带真实 Date、没有结尾空行的 GET_PARAMETER 保活。
+                if (expected == null && isKeepAliveWithDateWithoutBlankLine(payload)) return
                 if (expected == null) fail("$label：参考实现拒绝的报文被接受了")
                 assertEquals(expected.substringBefore('/'), digest(outcome.message), label)
             }
@@ -169,6 +195,44 @@ class RtspParserTest {
                 RtspParser.requestMethod(m.firstLine)
             }
             assertTrue(secret !in e.message.orEmpty())
+        }
+    }
+
+    /**
+     * 鸿蒙 4.2 在投屏中暂停播放时发的保活：Date 带真实时间、结尾没有空行。
+     * 这条是实测原文，必须能解析成保活消息，否则投屏会在这里断开。
+     */
+    @Test
+    fun keepAliveWithRealDateAndNoBlankLineIsAccepted() {
+        val crlf = "\r\n"
+        val payload = ascii(
+            "GET_PARAMETER rtsp://localhost/hisight1.1 RTSP/1.0" + crlf +
+                "Date: 2026-11-22 20:48:22 PM Sun" + crlf +
+                "CSeq: 7" + crlf,
+        )
+        val m = RtspParser.parse(payload)
+        assertEquals("GET_PARAMETER rtsp://localhost/hisight1.1 RTSP/1.0", m.firstLine)
+        assertEquals("2026-11-22 20:48:22 PM Sun", m.header("date"))
+        assertEquals(7, m.cseq)
+        assertEquals(0, m.body.size)
+        assertEquals("GET_PARAMETER", RtspParser.requestMethod(m.firstLine))
+
+        // Date 为空的那一种（参考实现原本就接受）同样可以。
+        val emptyDate = RtspParser.parse(
+            ascii("GET_PARAMETER rtsp://example.invalid/x RTSP/1.0" + crlf + "Date: " + crlf + "CSeq: 3" + crlf),
+        )
+        assertEquals(3, emptyDate.cseq)
+
+        // 只带 CSeq、没有 Date 的仍然拒绝：那是残缺报文，不是保活。
+        assertFailsWith<MalformedMessageException> {
+            RtspParser.parse(ascii("GET_PARAMETER rtsp://example.invalid/x RTSP/1.0" + crlf + "CSeq: 6" + crlf))
+        }
+        // 带多余头的也拒绝。
+        assertFailsWith<MalformedMessageException> {
+            RtspParser.parse(
+                ascii("GET_PARAMETER rtsp://example.invalid/x RTSP/1.0" + crlf + "Date: t" + crlf +
+                    "CSeq: 6" + crlf + "X: y" + crlf),
+            )
         }
     }
 

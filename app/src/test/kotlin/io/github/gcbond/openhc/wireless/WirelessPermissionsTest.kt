@@ -6,6 +6,7 @@ import io.github.gcbond.openhc.wireless.WirelessPermissions.COARSE_LOCATION
 import io.github.gcbond.openhc.wireless.WirelessPermissions.FINE_LOCATION
 import io.github.gcbond.openhc.wireless.WirelessPermissions.NEARBY_WIFI_DEVICES
 import io.github.gcbond.openhc.wireless.WirelessPermissions.POST_NOTIFICATIONS
+import io.github.gcbond.openhc.wireless.WirelessPermissions.WRITE_SETTINGS
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -18,9 +19,22 @@ class WirelessPermissionsTest {
 
     @Test
     fun requiredPermissionsByVersion() {
-        for (sdk in listOf(23, 26, 28, 29, 30)) assertEquals(listOf(FINE_LOCATION), WirelessPermissions.required(sdk), "安卓 $sdk")
+        // 安卓 6.0～7.1：开热点走旧的 setWifiApEnabled，要「修改系统设置」而不是位置权限。
+        for (sdk in listOf(23, 24, 25)) assertEquals(listOf(WRITE_SETTINGS), WirelessPermissions.required(sdk), "安卓 $sdk")
+        for (sdk in listOf(26, 28, 29, 30)) assertEquals(listOf(FINE_LOCATION), WirelessPermissions.required(sdk), "安卓 $sdk")
         for (sdk in listOf(31, 32)) assertEquals(listOf(BLUETOOTH_CONNECT, FINE_LOCATION), WirelessPermissions.required(sdk))
         for (sdk in listOf(33, 34, 36)) assertEquals(listOf(BLUETOOTH_CONNECT, NEARBY_WIFI_DEVICES), WirelessPermissions.required(sdk))
+    }
+
+    @Test
+    fun writeSettingsIsOnlyForTheLegacyHotspotAndNeverInTheRuntimeDialog() {
+        for (sdk in listOf(23, 24, 25)) assertTrue(WirelessPermissions.needsWriteSettings(sdk), "安卓 $sdk")
+        for (sdk in listOf(26, 29, 31, 33, 36)) assertFalse(WirelessPermissions.needsWriteSettings(sdk), "安卓 $sdk")
+        // 「修改系统设置」是 appop 权限，运行时弹窗申请不到，不能混进申请列表。
+        for (sdk in listOf(23, 24, 25)) {
+            assertFalse(WRITE_SETTINGS in WirelessPermissions.toRequest(sdk, askNotifications = false), "安卓 $sdk")
+        }
+        assertEquals(emptyList(), WirelessPermissions.toRequest(23, askNotifications = false))
     }
 
     @Test

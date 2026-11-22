@@ -87,9 +87,11 @@ class WifiRestorePolicyTest {
     fun hotspotNeedsAndroid8() {
         assertEquals(true, WirelessNetworkPlan.hotspotSupported(26))
         assertEquals(true, WirelessNetworkPlan.hotspotSupported(36))
-        // 安卓 8.0 以下没有本地热点：用不了无线连接。
-        assertEquals(false, WirelessNetworkPlan.hotspotSupported(25))
-        assertEquals(false, WirelessNetworkPlan.hotspotSupported(23))
+        // 安卓 8.0 以下退回旧的 setWifiApEnabled（普通个人热点），照样能开：见 WirelessNetworkPlanTest。
+        assertEquals(true, WirelessNetworkPlan.hotspotSupported(25))
+        assertEquals(true, WirelessNetworkPlan.hotspotSupported(23))
+        // 安卓 5.0 以下没有可用的接口。
+        assertEquals(false, WirelessNetworkPlan.hotspotSupported(20))
     }
 
     @Test
