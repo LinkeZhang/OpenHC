@@ -86,9 +86,9 @@ internal class Capabilities(private val config: HiSightConfig) {
             throw MalformedMessageException("能力选择为空或含未实现字段")
         }
         fields["his_version"]?.let { if (!isAcceptedVersion(it)) throw MalformedMessageException("手机版本不是 1.0 或 1.1") }
-        fields["his_audio_codecs"]?.let {
-            if (it.lowercase() != "none") throw MalformedMessageException("手机选择了未声明的音频能力")
-        }
+        // his_audio_codecs 只识别不使用：投屏层不声明、也不处理音频（声音走 DMSDP 的音频通道），
+        // 但有的手机（实测鸿蒙 4.2）会在这条选择里把它带回来，内容不是 none。这只是它多说的能力，
+        // 不影响视频、输入、加密的任何一项，不该因此断掉整个投屏，所以直接忽略。
 
         var events = inputEvents
         var vendors = inputVendors
@@ -108,14 +108,13 @@ internal class Capabilities(private val config: HiSightConfig) {
         } else if (uibc != null && uibc.lowercase() != "none") {
             throw MalformedMessageException("手机选择了未声明的输入能力")
         }
-        fields["his_media_capability"]?.let {
-            val v = it.lowercase()
-            if (v != "" && v != "none") throw MalformedMessageException("手机选择了未声明的扩展媒体能力")
-        }
-        if ("his_vtp" in fields) throw MalformedMessageException("没有声明 VTP，手机却选择了它")
-        fields["his_feature"]?.let {
-            if (it != "input_feature_set=;") throw MalformedMessageException("手机选择了未实现的输入功能")
-        }
+        // his_media_capability / his_vtp / his_feature：本端声明的是**空集合**，手机却会把自己支持的能力一并
+        // 回传。它们只描述手机自己具备什么，不改变本端要处理的事件集合——真正的输入协商走 his_uibc_capability，
+        // 视频参数走 his_video_formats，二者都照常严格校验。拒绝只会让这类手机连不上（鸿蒙 4.2 实测三处都会带）。
+        //
+        // his_feature 的 `input_feature_set` 只用于声明"本端实现了哪些可选输入功能"；本端一个都没实现，
+        // 所以声明为空。手机回 1, 101, 102… 是它自己支持的清单，不是要求本端实现，忽略即可。
+        // 如果哪天本端真的实现了某个编号的功能，才需要在这里改成"手机必须选中该编号"。
 
         var source = sourceDeviceType
         val deviceValue = fields["his_device_type"]
@@ -195,25 +194,68 @@ internal class Capabilities(private val config: HiSightConfig) {
             fields[name] = part.substring(eq + 1)
         }
         val generic = fields["generic_cap_list"]
-        if (fields["input_category_list"] != "GENERIC" || generic == null) {
+        if (fields["input_category_list"].orEmpty().trim() != "GENERIC" || generic == null) {
             throw MalformedMessageException("输入选择必须是已声明的 GENERIC 类别")
         }
-        var events = if (generic.isEmpty()) emptyList() else generic.split(", ")
-        if (events.toSet().size != events.size || events.any { it !in advertisedEvents }) {
-            throw MalformedMessageException("输入选择含重复或未声明的事件")
+        var events = splitList(generic)
+        // 手机回传的列表常常和声明的写法不完全一致（实测鸿蒙 4.2），有两类差异不该让协商失败：
+        // 1. 整份列表重复一遍（`a, b, c, a, b, c`）：这不是"重复选择"，按出现顺序去重即可；
+        // 2. 额外带上鼠标事件 mouse_down / mouse_up / mouse_move：本端从没声明鼠标，投屏层也不处理鼠标，
+        //    这是手机多说的能力，忽略它不影响本端实际处理的事件集合。
+        // 除此之外的未知事件仍然拒绝：那说明手机选了我们没声明的东西，不能装作没看见。
+        // 这两处是与参考实现的有意偏离（参考实现遇到多出来的项直接拒绝），理由和 his_audio_codecs 一样：
+        // 拒绝只会让这类手机连不上。
+        events = events.distinct()
+        val unknown = events.filter { it !in advertisedEvents && it !in IGNORABLE_EVENTS }
+        if (unknown.isNotEmpty()) {
+            throw MalformedMessageException(
+                "输入选择含未声明的事件（手机给了：${eventExcerpt(generic)}）",
+            )
         }
-        if (!events.containsAll(requiredEvents)) throw MalformedMessageException("输入选择缺少已声明的事件")
-        // 可选的按键事件只选了一半：当作没选，免得按下发得出去、抬起发不出去。
+        events = events.filter { it in advertisedEvents }
+        if (!events.containsAll(requiredEvents)) {
+            throw MalformedMessageException(
+                "输入选择缺少已声明的事件（手机给了：${eventExcerpt(generic)}）",
+            )
+        }
+        // 可选的按键事件只选了一半：当作没选，免得按下发得出去、抬不起来。
         if (!events.containsAll(optionalEvents)) events = events.filter { it !in optionalEvents }
         var vendors = emptyList<String>()
         fields["vendor_cap_list"]?.let { list ->
-            vendors = list.split(", ")
-            if (vendors.toSet().size != vendors.size || vendors.any { it !in advertisedVendors }) {
-                throw MalformedMessageException("vendor 输入选择含重复或未声明的能力")
+            // 空串在这里按「给了一个空能力」处理（会被判为未声明），与参考实现一致：
+            // 只有完全不写这个字段才算「没有 vendor 能力」。
+            vendors = if (list.isEmpty()) listOf("") else splitList(list).distinct()
+            if (vendors.any { it !in advertisedVendors }) {
+                throw MalformedMessageException("vendor 输入选择含未声明的能力（手机给了：${eventExcerpt(list)}）")
             }
         }
         if (vendors.toSet() != advertisedVendors.toSet()) throw MalformedMessageException("vendor 输入选择不完整")
         return events to vendors
+    }
+
+    /**
+     * 拆能力列表：分隔符是逗号，逗号后的空格可有可无（各家手机写法不同，鸿蒙 4.2 就不带空格），
+     * 两端空白一并去掉，空项忽略。只接受逗号，避免把事件名里的字符误当分隔符。
+     */
+    private fun splitList(value: String): List<String> {
+        if (value.isBlank()) return emptyList()
+        return value.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    /** 出错提示里附上手机给的字段原文（[eventExcerpt] 的别名，语义更通用）。 */
+    private fun valueExcerpt(value: String): String = eventExcerpt(value)
+
+    /** 出错提示里附上手机给的列表原文：只有事件名和逗号，不含任何密钥。 */
+    private fun eventExcerpt(value: String): String {
+        val out = StringBuilder()
+        for (c in value) {
+            if (out.length >= 120) {
+                out.append("...")
+                break
+            }
+            out.append(if (c in ' '..'~') c else '.')
+        }
+        return if (out.isEmpty()) "空" else out.toString()
     }
 
     private fun isAcceptedVersion(text: String): Boolean {
@@ -229,6 +271,12 @@ internal class Capabilities(private val config: HiSightConfig) {
     companion object {
         val TOUCH_EVENTS = listOf("left_point_down", "left_point_up", "left_move")
         val KEY_EVENTS = listOf("left_key_down", "left_key_up")
+
+        /**
+         * 手机可能多带、但本端明确不处理也不需要处理的事件：鼠标。投屏层不声明鼠标能力，
+         * 鸿蒙 4.2 实测会把它一并回传，忽略即可（见 [inputSelection]）。
+         */
+        private val IGNORABLE_EVENTS = setOf("mouse_down", "mouse_up", "mouse_move")
         const val TEXT_VENDOR = "input_content"
         private val VIDEO_FIELDS = setOf(
             "codecs", "fps", "gop", "bitrate", "vbr-min", "vbr-max", "dpi",

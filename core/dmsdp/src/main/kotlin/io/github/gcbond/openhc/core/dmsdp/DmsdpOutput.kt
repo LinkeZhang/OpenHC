@@ -126,7 +126,44 @@ sealed class DmsdpEvent : DmsdpOutput {
      * （例如数据会话的 `SET_PARAMETER`）、手机的响应，以及格式不符合保活/时间同步要求的同名请求。
      */
     class UnhandledControlMessage(val message: DmsdpMessage) : DmsdpEvent() {
-        override fun toString() = "UnhandledControlMessage(${message.startLine})"
+        /**
+         * 带上全部头部和正文摘要：鸿蒙 4.2 在音频 SETUP 后不回 200 时，很可能回了一条我们没认出来的
+         * 消息（错误应答、CSeq 对不上的应答）。只写首行的话，日志里看不出它到底回了什么。
+         */
+        override fun toString(): String {
+            val head = message.headers.joinToString("；") { "${it.first}: ${it.second.take(MAX_VALUE_CHARS)}" }
+            val body = if (message.bodySize == 0) {
+                ""
+            } else {
+                "；正文 ${message.bodySize} 字节：${String(message.body, Charsets.ISO_8859_1).take(MAX_BODY_CHARS)}"
+            }
+            return "UnhandledControlMessage(${message.startLine}；$head$body)"
+        }
+
+        private companion object {
+            const val MAX_VALUE_CHARS = 120
+            const val MAX_BODY_CHARS = 160
+        }
+    }
+
+    /**
+     * 控制连接上的二进制载荷（不是文本消息，本层不解析）。实测鸿蒙 4.2 在「智慧聆听」检测时
+     * 会发这类私有二进制块。只出诊断，不断会话。
+     */
+    class OpaqueControlPayload(val bytes: Int, val head: ByteArray = EMPTY_HEAD) : DmsdpEvent() {
+        /**
+         * 带上前 32 字节的十六进制：鸿蒙 4.2 在 SETUP 后不连数据端口，而是把整条音频流（实测
+         * 1418/1228 字节一包、约 200KB/s，正好是 48kHz 双声道 16 位 PCM 的码率）灌进控制连接。
+         * 只记长度看不出它到底是不是 RTP、有没有多一层头，没法判断怎么解。
+         */
+        override fun toString(): String {
+            val hex = if (head.isEmpty()) "" else "；前 ${head.size} 字节=" + head.joinToString("") { "%02x".format(it) }
+            return "OpaqueControlPayload($bytes 字节$hex)"
+        }
+
+        private companion object {
+            val EMPTY_HEAD = ByteArray(0)
+        }
     }
 
     // ---------- 保活 ----------
