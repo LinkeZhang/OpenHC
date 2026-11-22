@@ -330,8 +330,15 @@ private fun AppRoot(
         Screen.SETTINGS -> {
             val context = LocalContext.current
             val screenSpec = remember { io.github.gcbond.openhc.connection.DisplayArea.screenFor(context, settings.fullScreen) }
-            val systemBluetooth = remember { DeviceInfo.systemBluetoothAddress() }
-            SettingsScreen(settings, screenSpec, systemBluetooth, onBack = closeSettings)
+            val systemBluetooth = remember { DeviceInfo.systemBluetoothAddress(context) }
+            SettingsScreen(
+                settings,
+                screenSpec,
+                systemBluetooth,
+                // 「自动读取」按钮：用户手动触发，把所有来源的候选值都列出来让车主挑（首次打开时车机可能还没初始化好）。
+                onReadCandidates = { DeviceInfo.bluetoothAddressCandidates(context) },
+                onBack = closeSettings,
+            )
         }
         Screen.PROJECTION -> if (projectionWireless) {
             ProjectionScreen(wState.projection, wDecoder, wTouchResets, onInput = wireless::sendInput)

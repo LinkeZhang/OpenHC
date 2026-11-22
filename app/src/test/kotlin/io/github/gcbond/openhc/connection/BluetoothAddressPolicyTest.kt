@@ -13,19 +13,27 @@ class BluetoothAddressPolicyTest {
     private val property = "0A:1B:2C:3D:4E:5F"
     private val manual = "02:12:34:56:78:9A"
 
+    /**
+     * 无线也用**手填的优先**：从系统读地址本来就靠猜厂商写在哪个属性里，猜错会读到一个看起来合法、
+     * 其实是别的设备的地址，二维码带着它手机永远连不上、车机这边还不报错。车主照着「关于本机」填的一定是真的。
+     */
     @Test
-    fun wirelessPrefersSystemPropertyThenManual() {
-        assertEquals(
-            BluetoothChoice(property, BluetoothSource.SYSTEM_PROPERTY),
-            BluetoothAddressPolicy.chooseForWireless(property, manual),
-        )
-        assertEquals(BluetoothChoice(manual, BluetoothSource.MANUAL), BluetoothAddressPolicy.chooseForWireless(null, manual))
+    fun wirelessPrefersManualOverSystemProperty() {
         assertEquals(
             BluetoothChoice(manual, BluetoothSource.MANUAL),
-            BluetoothAddressPolicy.chooseForWireless("02:00:00:00:00:00", manual),
-            "系统属性是占位值时退到手填的",
+            BluetoothAddressPolicy.chooseForWireless(property, manual),
+            "两者都有时用手填的",
         )
-        assertEquals(BluetoothChoice(null, BluetoothSource.UNAVAILABLE), BluetoothAddressPolicy.chooseForWireless(null, ""))
+        assertEquals(
+            BluetoothChoice(property, BluetoothSource.SYSTEM_PROPERTY),
+            BluetoothAddressPolicy.chooseForWireless(property, null),
+            "没手填才用系统读到的",
+        )
+        assertEquals(
+            BluetoothChoice(property, BluetoothSource.SYSTEM_PROPERTY),
+            BluetoothAddressPolicy.chooseForWireless(property, "  "),
+            "手填是空白等于没填",
+        )
     }
 
     @Test
@@ -88,5 +96,15 @@ class BluetoothAddressPolicyTest {
         val host = HostIdentity("000000", "00", "合成品牌", "合成车机")
         assertEquals(NearbySession.deviceId(host, "02:00:00:00:00:00"), NearbySession.deviceId(host, null))
         assertNotEquals(NearbySession.deviceId(host, null), NearbySession.deviceId(host, property))
+    }
+
+    /** 属性名清单：常用的几个都在，且第一个就是文档里写的那个。 */
+    @Test
+    fun propertyKeysCoverCommonVendors() {
+        assertEquals(BluetoothAddressPolicy.SYSTEM_PROPERTY_KEY, BluetoothAddressPolicy.PROPERTY_KEYS.first())
+        for (key in listOf("persist.sys.bt_addr", "persist.vendor.bt.bdaddr", "ro.bt.bdaddr")) {
+            assertEquals(true, key in BluetoothAddressPolicy.PROPERTY_KEYS, key)
+        }
+        assertEquals(BluetoothAddressPolicy.PROPERTY_KEYS.size, BluetoothAddressPolicy.PROPERTY_KEYS.distinct().size, "不能有重复")
     }
 }

@@ -78,6 +78,7 @@ internal fun wirelessNoticeText(notice: WirelessNotice): String = when (notice) 
     WirelessNotice.BluetoothUnsupported -> stringResource(R.string.wireless_notice_bt_unsupported)
     WirelessNotice.BluetoothOff -> stringResource(R.string.wireless_notice_bt_off)
     WirelessNotice.HotspotUnsupported -> stringResource(R.string.wireless_notice_hotspot_unsupported)
+    WirelessNotice.WriteSettingsRequired -> stringResource(R.string.wireless_notice_write_settings)
     is WirelessNotice.PermissionsDenied -> when {
         notice.approximateOnly -> stringResource(R.string.wireless_notice_precise_location)
         notice.permanently -> stringResource(R.string.wireless_notice_permissions_permanent, permissionNames(notice.missing))
