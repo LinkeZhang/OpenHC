@@ -121,9 +121,44 @@ class DmsdpMessage(
             return if (out.isEmpty()) "空" else out.toString()
         }
 
-        /** 看起来是文字消息：以大写字母开头（方法名或 `DMSDP/1.0`），并且有头部结束的空行。 */
-        fun looksLikeText(payload: ByteArray): Boolean =
-            payload.isNotEmpty() && payload[0] in 'A'.code.toByte()..'Z'.code.toByte() && indexOfBlankLine(payload) >= 0
+        /**
+         * 看起来是文字消息。
+         *
+         * 判据要严：首行（第一个换行之前）必须全是可打印 ASCII，并且是「方法名 + 空格 + 目标」
+         * 或版本词 `DMSDP/1.0` 开头。二进制块通常在头几个字节就有非 ASCII 字节，一测就出来。
+         *
+         * **不能用「首字节是大写字母 + 含空行」这种宽判据**：手机在控制连接上发的二进制块
+         * （实测鸿蒙 NEXT 会发以 `R`/`V`/`G` 开头、中间恰好含 `\r\n\r\n` 的块）会被误判成文本，
+         * 接着送进 [parse] 抛异常，整条会话作废、手机断开，
+         * 表现是「设备控制连接网络错误（读失败：SocketException: Software caused connection abort）」。
+         * 这类载荷必须落到「认不出的二进制」分支跳过，不能当文本解析。
+         */
+        fun looksLikeText(payload: ByteArray): Boolean {
+            if (payload.isEmpty()) return false
+            val limit = minOf(payload.size, TEXT_HEAD_LIMIT)
+            var newline = -1
+            for (i in 0 until limit) {
+                val v = payload[i].toInt() and 0xFF
+                if (v == 0x0A) {
+                    newline = i
+                    break
+                }
+                // 控制字符（CR 除外）或非 ASCII：不是文本首行。
+                if (v != 0x0D && (v < 0x20 || v > 0x7E)) return false
+            }
+            // 有换行就只看首行；没有换行时整段都得是可打印的。
+            val headEnd = if (newline >= 0) newline else limit
+            if (headEnd == 0) return false
+            val head = String(payload, 0, headEnd, Charsets.US_ASCII).trimEnd('\r')
+            // 首行要有「方法 + 空格 + 目标」，单独一个词不是 DMSDP 消息。
+            if (!head.contains(' ')) return false
+            val method = head.substringBefore(' ')
+            // 请求的方法名是纯字母（GET_PARAMETER、SET_PARAMETER…）；应答以版本词 DMSDP/1.0 开头。
+            return method == VERSION || (method.isNotEmpty() && method.all { it.isLetter() || it == '_' })
+        }
+
+        /** 判 [looksLikeText] 时最多看首行这么多字节。 */
+        private const val TEXT_HEAD_LIMIT = 512
 
         /** 编码一条消息：首行、头部各占一行（CRLF），再一个空行，再正文。 */
         fun encode(startLine: String, headers: List<Pair<String, String>>, body: ByteArray = ByteArray(0)): ByteArray {
@@ -132,13 +167,6 @@ class DmsdpMessage(
             text.append("\r\n")
             val head = text.toString().toByteArray(Charsets.UTF_8)
             return if (body.isEmpty()) head else head + body
-        }
-
-        private fun indexOfBlankLine(data: ByteArray): Int {
-            for (i in 0..data.size - 4) {
-                if (data[i] == CR && data[i + 1] == LF && data[i + 2] == CR && data[i + 3] == LF) return i
-            }
-            return -1
         }
 
         /** 去掉首尾空白和控制字符（与 Java String.trim 相同的范围）。 */
