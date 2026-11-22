@@ -280,6 +280,35 @@ class ControlSessionTest {
         assertTrue(session.isEncrypted)
     }
 
+    /**
+     * 加密后的控制连接上，手机还会发**二进制**载荷（实测鸿蒙 4.2 的「智慧聆听」检测，以 `##` 开头）。
+     * 它不是文本消息：只出诊断事件，不断会话，后面的正常消息照常处理。
+     */
+    @Test
+    fun binaryControlPayloadBecomesDiagnosticNotFailure() {
+        val (session, _) = encryptedSession()
+        // 模拟实测：`##` 开头，后面是不可打印字节。
+        val binary = byteArrayOf(0x23, 0x23, 0x00, 0x01, 0x02, 0x7F, 0x10, 0x03, 0x78, 0x80.toByte(), 0x00, 0x05)
+        val out = session.feed(DmsdpChannel.CONTROL, phone.encryptedFrame(binary))
+        val event = assertIs<DmsdpEvent.OpaqueControlPayload>(out.single())
+        assertEquals(binary.size, event.bytes)
+        // 会话没有作废：还能继续收正常消息。
+        assertTrue(session.isEncrypted)
+        val next = session.feed(
+            DmsdpChannel.CONTROL,
+            phone.encryptedText("SET_PARAMETER * DMSDP/1.0\r\nCSeq: 5\r\nTimeServerPort: 0\r\nTimeUsHigh: 1\r\nTimeUsLow: 2\r\n\r\n"),
+        )
+        assertIs<DmsdpEvent.TimeSyncRequested>(next.events().single())
+    }
+
+    /** 以 `$` 开头的载荷仍然走设备记录分支，不会被当成二进制块丢掉。 */
+    @Test
+    fun deviceRecordsAreStillParsedAsRecords() {
+        val (session, _) = encryptedSession()
+        val out = session.feed(DmsdpChannel.CONTROL, phone.encryptedRecord(1, 546, "{}".toByteArray()))
+        assertIs<DmsdpEvent.UnhandledDeviceData>(out.single())
+    }
+
     @Test
     fun deviceRecordsAreDispatchedInOrder() {
         val (session, _) = encryptedSession()
@@ -366,5 +395,44 @@ class ControlSessionTest {
             "OPTIONS * DMSDP/1.0\r\nA: 1\r\n\r\nxy",
             String(DmsdpMessage.encode("OPTIONS * DMSDP/1.0", listOf("A" to "1"), "xy".toByteArray())),
         )
+    }
+
+    /**
+     * 头部结束的空行按容错处理：标准 CRLFCRLF 之外，手机侧还可能只发 LF、混用 CRLF+LF，
+     * 或者干脆没有头部/没有空行。这些都要能拆出来，不能因为一个换行写法就断开投屏。
+     */
+    @Test
+    fun headerEndAcceptsLfAndMissingBlankLineVariants() {
+        // 只有 LF。
+        val lf = DmsdpMessage.parse("GET_PARAMETER x DMSDP/1.0\nA: 1\n\nbody".toByteArray())
+        assertEquals("GET_PARAMETER x DMSDP/1.0", lf.startLine)
+        assertEquals("1", lf.header("a"))
+        assertEquals("body", String(lf.body))
+        // CRLF 之后接 LF（混用）。
+        val mixed = DmsdpMessage.parse("SET_PARAMETER x DMSDP/1.0\r\nA: 1\n\nbody".toByteArray())
+        assertEquals("1", mixed.header("A"))
+        assertEquals("body", String(mixed.body))
+        // 只有一行起始行、没有换行：当成无头部、无正文的消息。
+        val bare = DmsdpMessage.parse("OPTIONS * DMSDP/1.0".toByteArray())
+        assertEquals("OPTIONS * DMSDP/1.0", bare.startLine)
+        assertTrue(bare.headers.isEmpty())
+        assertEquals(0, bare.bodySize)
+        // 起始行 CRLF 之后没有空行：接受，正文为空。
+        val noBlank = DmsdpMessage.parse("OPTIONS * DMSDP/1.0\r\n".toByteArray())
+        assertEquals("OPTIONS * DMSDP/1.0", noBlank.startLine)
+        assertEquals(0, noBlank.bodySize)
+        // 头部行之间混用 CRLF 与 LF。
+        val lines = DmsdpMessage.parse("GET x DMSDP/1.0\r\nA: 1\nB: 2\r\n\r\n".toByteArray())
+        assertEquals(listOf("A" to "1", "B" to "2"), lines.headers)
+    }
+
+    /** 真的拆不出来时仍然报错，并在提示里附上原文，方便对着手机实际发的内容定位。 */
+    @Test
+    fun unparseableMessageErrorCarriesTheRawText() {
+        val e = assertFailsWith<MalformedMessageException> {
+            DmsdpMessage.parse("OPTIONS * DMSDP/1.0\r\nA: 1\r\nB: 2\r\nC: 3".toByteArray())
+        }
+        assertTrue(e.message.orEmpty().contains("原文"), e.message)
+        assertTrue(e.message.orEmpty().contains("A: 1"), e.message)
     }
 }

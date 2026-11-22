@@ -6,6 +6,7 @@ import io.github.gcbond.openhc.core.dmsdp.audio.CarAudioFocus
 import io.github.gcbond.openhc.core.dmsdp.audio.MicStreamListener
 import io.github.gcbond.openhc.core.dmsdp.audio.PhoneAudioFocus
 import io.github.gcbond.openhc.core.dmsdp.audio.PhoneStateMessages
+import io.github.gcbond.openhc.core.dmsdp.audio.PrivateAudioFrames
 import kotlinx.serialization.json.JsonPrimitive
 import java.security.SecureRandom
 
@@ -78,6 +79,10 @@ class DmsdpSession(
     private val controlDecoder = ControlFrameDecoder()
     private var controlState = ControlState.NOT_CONNECTED
     private var nextCSeq = 1
+
+    /** 收到过几条控制连接上的二进制载荷；只给前几条记头部字节，见 [DmsdpEvent.OpaqueControlPayload]。 */
+    private var opaquePayloads = 0
+    private val OPAQUE_HEAD_LIMIT = 3
     private var tcpKeepAlive: TcpKeepAlive? = null
     private var udpKeepAlive: UdpKeepAlive? = null
 
@@ -436,6 +441,22 @@ class DmsdpSession(
             for (record in DeviceRecords.parseAll(payload)) onDeviceRecord(record, nowMillis, out)
             return
         }
+        // 加密后的控制连接上，手机除了文本消息还会发**二进制**载荷。鸿蒙 4.2 在音频 SETUP 之后
+        // 不连数据端口，而是把 PCM 直接灌在这里（`##` 私有帧，见 PrivateAudioFrames）——
+        // 这些包以前被当成「不认识的二进制」丢掉，表现就是投屏正常但完全没声音。先认这种帧。
+        if (speaker != null && PrivateAudioFrames.isPrivateFrame(payload, 0, payload.size)) {
+            audioQuietly(out) { speaker.feedPrivateFrame(payload, 0, payload.size, nowMillis, out) }
+            return
+        }
+        // 其它二进制块（实测鸿蒙 4.2 在「智慧聆听」检测时发过以 `##` 开头的私有块）。
+        // 不是文本协议，本层不解析，但也不能让整条会话作废——那会把投屏直接断掉。
+        if (!looksLikeText(payload)) {
+            // 前几包带上头部字节：判断是不是 RTP、有没有额外封装。只记前 3 包，避免日志被刷满。
+            opaquePayloads++
+            val head = if (opaquePayloads <= OPAQUE_HEAD_LIMIT) payload.copyOfRange(0, minOf(payload.size, 32)) else ByteArray(0)
+            out.event(DmsdpEvent.OpaqueControlPayload(payload.size, head))
+            return
+        }
         val message = DmsdpMessage.parse(payload)
         when {
             isKeepAliveRequest(message) -> tcpKeepAlive?.onPeerRequest()
@@ -469,6 +490,34 @@ class DmsdpSession(
     }
 
     private fun phoneClockUs(nowMillis: Long): Long? = phoneTimeUs?.let { it + (nowMillis - phoneTimeAtMillis) * 1000 }
+
+    /**
+     * 载荷是否像 DMSDP 文本消息：首行（第一个换行之前）必须全是可打印 ASCII，
+     * 且以 `DMSDP/1.0` 之外的方法词开头、含空格。二进制块通常在头几个字节就有非 ASCII 字节，一测就出来。
+     */
+    private fun looksLikeText(payload: ByteArray): Boolean {
+        if (payload.isEmpty()) return false
+        val limit = minOf(payload.size, 512)
+        var newline = -1
+        for (i in 0 until limit) {
+            val v = payload[i].toInt() and 0xFF
+            if (v == 0x0A) {
+                newline = i
+                break
+            }
+            // 控制字符（CR 除外）或非 ASCII：不是文本首行。
+            if (v != 0x0D && (v < 0x20 || v > 0x7E)) return false
+        }
+        // 有换行就只看首行；没有换行时整段都得是可打印的。
+        val headEnd = if (newline >= 0) newline else limit
+        if (headEnd == 0) return false
+        val head = String(payload, 0, headEnd, Charsets.US_ASCII).trimEnd('\r')
+        // 首行要有「方法 + 空格 + 目标」，单独一个词不是 DMSDP 消息。
+        if (!head.contains(' ')) return false
+        val method = head.substringBefore(' ')
+        // 请求的方法名是纯字母（GET_PARAMETER、SET_PARAMETER…）；应答以版本词 DMSDP/1.0 开头。
+        return method == DmsdpMessage.VERSION || (method.isNotEmpty() && method.all { it.isLetter() || it == '_' })
+    }
 
     /** 手机的保活：首行正好是 `GET_PARAMETER * DMSDP/1.0`、CSeq 为正整数、没有正文。只更新存活，不回 200。 */
     private fun isKeepAliveRequest(message: DmsdpMessage): Boolean {
