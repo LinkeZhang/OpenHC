@@ -102,6 +102,16 @@ class LocalHotspotOwner private constructor(context: Context) {
     /** 最近一次失败的具体原因（系统回话或调用被拒）。 */
     private var lastFailure: String? = null
 
+    /** 旧接口（安卓 8.0 以下）开热点时我们自己给的那份配置；新接口一直是 null。 */
+    private var legacyConfig: android.net.wifi.WifiConfiguration? = null
+
+    /** 旧接口开好热点后读回来的配置（名字、口令、频段）；新接口一直是 null。 */
+    private var legacyInfo: ReservationInfo? = null
+
+    /** 旧接口开热点等它起来的最后时刻。 */
+    private var legacyDeadline = 0L
+    private val legacyPollTask = Runnable { legacyPoll() }
+
     /** 先开好留着时给的日志：没有连接用着热点时，申请和系统回话写到这里。 */
     private var standbyLog: ((String) -> Unit)? = null
     private val wake = Runnable { drive { machine.onTick(now()) } }
@@ -246,6 +256,17 @@ class LocalHotspotOwner private constructor(context: Context) {
             if (!stopped) events.onFailed(message)
         }
 
+        /** 旧接口（安卓 8.0 以下）的热点起来了：走和新接口一样的「等网卡地址」。 */
+        fun onLegacyStarted() {
+            if (stopped || stage != Stage.WAITING_SYSTEM) return
+            val read = legacyInfo
+            if (read == null) return fail("读不到热点的配置")
+            info = read
+            stage = Stage.WAITING_ADDRESS
+            addressDeadline = now() + ADDRESS_WAIT_MS
+            pollAddress()
+        }
+
         fun lose(message: String) {
             if (stage != Stage.READY) return fail(message)
             stage = Stage.ENDED
@@ -268,12 +289,17 @@ class LocalHotspotOwner private constructor(context: Context) {
                 HotspotEffect.Request -> requestNow()
                 HotspotEffect.Release -> releaseNow()
                 is HotspotEffect.Started -> {
-                    val held = reservation
-                    if (held == null) {
-                        lastFailure = "系统回话里没有热点"
-                        drive { machine.onFailed(now()) }
+                    if (LegacyHotspot.isLegacy(Build.VERSION.SDK_INT)) {
+                        // 旧接口没有系统给的热点对象，配置是我们自己给的那份，读回来的结果在 legacyInfo。
+                        runs[effect.owner]?.onLegacyStarted()
                     } else {
-                        runs[effect.owner]?.onSystemStarted(held)
+                        val held = reservation
+                        if (held == null) {
+                            lastFailure = "系统回话里没有热点"
+                            drive { machine.onFailed(now()) }
+                        } else {
+                            runs[effect.owner]?.onSystemStarted(held)
+                        }
                     }
                 }
                 is HotspotEffect.Failed -> runs[effect.owner]?.fail(failureText(effect.failure))
@@ -294,14 +320,21 @@ class LocalHotspotOwner private constructor(context: Context) {
         HotspotFailure.BUSY -> failure.label
     }
 
-    /** 申请热点。申请前拍网卡快照（认热点网卡用）、记下车机 WiFi 开没开（恢复 WiFi 用）。 */
+    /**
+     * 申请热点。申请前拍网卡快照（认热点网卡用）、记下车机 WiFi 开没开（恢复 WiFi 用）。
+     *
+     * 安卓 8.0 以下在 [requestLegacy] 里就返回了，走不到下面的 `startLocalOnlyHotspot`（API 26 才有），
+     * 所以这里的 NewApi 告警是误报，用 [SuppressLint] 说明清楚。
+     */
+    @SuppressLint("NewApi")
     private fun requestNow() {
         lastFailure = null
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return rejected("安卓 8.0 以下没有本地热点")
         val manager = wifi ?: return rejected("拿不到系统的 WiFi 服务")
         before = snapshot()
         val stationOn = stationEnabled()
         if (stationOn) stationNote = true
+        // 安卓 8.0 以下没有「只供本地通信」的热点，走旧的 setWifiApEnabled（普通个人热点），见 LegacyHotspot。
+        if (LegacyHotspot.isLegacy(Build.VERSION.SDK_INT)) return requestLegacy(manager, stationOn)
         note("向系统申请本地热点（车机 WiFi ${if (stationOn) "开着，当前连接 ${stationFrequency()} MHz" else "关着"}）")
         // 看门狗在另一条线程上跑：写到哪个日志在这里先取好，调用返回后它不再记、也不再排下一次。
         val log = currentLog()
@@ -349,6 +382,94 @@ class LocalHotspotOwner private constructor(context: Context) {
         "读不到调用栈"
     }
 
+    // ---------------------------------------------------------------- 安卓 8.0 以下：旧的 setWifiApEnabled
+
+    /**
+     * 走旧接口开热点（[LegacyHotspot]）。旧接口没有回调，只能开完轮询 `getWifiApState()`：
+     * 轮询到 `WIFI_AP_STATE_ENABLED` 才算开好，`FAILED` 或等太久算失败。
+     * 名字、密码由我们自己定，开好后读回来核对一遍。
+     */
+    private fun requestLegacy(manager: WifiManager, stationOn: Boolean) {
+        if (!LegacyHotspot.available()) return rejected("这台车机的系统没有旧的热点接口，开不了热点")
+        note(
+            "向系统申请热点（安卓 ${Build.VERSION.RELEASE} 的旧接口，普通个人热点；" +
+                "车机 WiFi ${if (stationOn) "开着，当前连接 ${stationFrequency()} MHz" else "关着"}）",
+        )
+        val config = try {
+            LegacyHotspot.configuration()
+        } catch (e: RuntimeException) {
+            return rejected("拼不出热点配置：${e.javaClass.simpleName}")
+        }
+        legacyConfig = config
+        val accepted = try {
+            LegacyHotspot.enable(manager, config, true)
+        } catch (e: SecurityException) {
+            return rejected(
+                if (LegacyHotspot.needsWriteSettings(Build.VERSION.SDK_INT)) {
+                    "系统不让开热点（${e.message}）：安卓 6～7 还要在系统设置里给本应用「修改系统设置」权限"
+                } else {
+                    "系统不让开热点（${e.message}）"
+                },
+            )
+        } catch (e: UnsupportedOperationException) {
+            return rejected("这台车机的系统没有旧的热点接口，开不了热点")
+        } catch (e: RuntimeException) {
+            return rejected("开热点出错：${e.javaClass.simpleName}：${e.message}")
+        }
+        if (!accepted) return rejected("系统没有收下开热点的请求")
+        note("系统收下了申请，等热点开起来（旧接口没有回调，轮询状态）")
+        legacyDeadline = now() + LEGACY_START_WAIT_MS
+        legacyPoll()
+    }
+
+    /** 轮询旧接口的热点状态；开好了就按新接口的路子读配置、等网卡地址。 */
+    private fun legacyPoll() {
+        val manager = wifi ?: return rejected("拿不到系统的 WiFi 服务")
+        when (LegacyHotspot.state(manager)) {
+            WIFI_AP_STATE_ENABLED -> {
+                val read = readLegacyConfiguration(manager)
+                legacyInfo = read
+                note("热点开起来了：加密 ${read.security.label}，${read.hint ?: "读不到频段"}")
+                when {
+                    LocalHotspotRules.networkName(read.ssid) == null -> return rejected("读不到热点的网络名")
+                    read.passphrase.isNullOrEmpty() -> return rejected("热点没有口令，手机按这套连接方式连不上")
+                }
+                // 交给状态机（和系统回调一样走 onStarted）：它会按主人有没有走决定留着还是关掉。
+                drive { machine.onStarted(now()) }
+                return
+            }
+            WIFI_AP_STATE_FAILED -> return rejected("系统开热点失败（WIFI_AP_STATE_FAILED）")
+        }
+        if (now() >= legacyDeadline) return rejected("申请开热点后 ${LEGACY_START_WAIT_MS / 1000} 秒热点还没起来")
+        handler.postDelayed(legacyPollTask, LEGACY_POLL_MS)
+    }
+
+    /** 旧接口开的热点：配置是我们自己给的那份，读回来核对。 */
+    @Suppress("DEPRECATION")
+    private fun readLegacyConfiguration(manager: WifiManager): ReservationInfo {
+        val current = LegacyHotspot.currentConfiguration(manager)
+        val ours = legacyConfig
+        val ssid = current?.SSID ?: ours?.SSID
+        val passphrase = current?.preSharedKey ?: ours?.preSharedKey
+        val security = when {
+            passphrase.isNullOrEmpty() -> HotspotSecurity.NO_PASSPHRASE
+            else -> HotspotSecurity.OK
+        }
+        // 频段、信道是隐藏字段，反射读；读不到就按推测。
+        val hint = LegacyHotspot.bandHint(current)
+        return ReservationInfo(ssid, passphrase, current?.BSSID, security, hint)
+    }
+
+    /** 关掉旧接口开的热点（[LegacyHotspot.enable] 传 null 表示关）。 */
+    private fun releaseLegacy() {
+        val manager = wifi ?: return
+        try {
+            LegacyHotspot.enable(manager, null, false)
+        } catch (e: RuntimeException) {
+            // 关不掉也无妨：系统在本进程退出时会收回。
+        }
+    }
+
     /** 申请和系统回话写到谁的日志里：有连接在用热点写它的，没有写先开好留着时给的。只在工作线程上调用。 */
     private fun note(message: String) = currentLog()(message)
 
@@ -389,6 +510,11 @@ class LocalHotspotOwner private constructor(context: Context) {
     }
 
     private fun releaseNow() {
+        if (LegacyHotspot.isLegacy(Build.VERSION.SDK_INT)) {
+            handler.removeCallbacks(legacyPollTask)
+            legacyConfig = null
+            return releaseLegacy()
+        }
         val held = reservation ?: return
         reservation = null
         closeQuietly(held)
@@ -543,6 +669,14 @@ class LocalHotspotOwner private constructor(context: Context) {
         private const val CALL_WATCH_FIRST_MS = 3_000L
         private const val CALL_WATCH_REPEAT_MS = 5_000L
         private const val STACK_FRAMES = 12
+
+        /** 旧接口（安卓 8.0 以下）开热点：多久查一次状态、最多等多久。 */
+        private const val LEGACY_POLL_MS = 250L
+        private const val LEGACY_START_WAIT_MS = 10_000L
+
+        /** 旧接口的 `getWifiApState()` 取值（WifiManager 里是 @hide 常量，这里写字面值）。 */
+        private const val WIFI_AP_STATE_ENABLED = 13
+        private const val WIFI_AP_STATE_FAILED = 14
 
         @Volatile
         private var instance: LocalHotspotOwner? = null
