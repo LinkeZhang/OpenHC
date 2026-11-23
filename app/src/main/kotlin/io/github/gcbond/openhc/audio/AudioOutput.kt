@@ -63,10 +63,19 @@ internal class AudioOutput(
      */
     private val continuousTuning: AudioTuning = prefs.playbackTuning().let {
         AudioTuning(
-            startMillis = 300,
-            targetMillis = 360,
-            maxMillis = 700,
-            trackMillis = 200,
+            // 起播门槛给足：第一批数据是突发来的，攒一点点就急着出声，
+            // 后面紧跟的低谷立刻把它放空，开头会抖好几秒。
+            startMillis = 1_000,
+            // 削峰目标就是长期维持的缓冲量。控制连接上音频和视频、文本挤在一条 TCP 里，
+            // 实测到达速率在 111～1157 包/秒之间剧烈抖动，低谷持续 1 秒以上。
+            // 缓冲要够厚才能把这些低谷抹平，代价是声音晚约 1 秒（投屏场景听不出）。
+            targetMillis = 1_500,
+            maxMillis = 3_000,
+            trackMillis = 300,
+            // 不要「起播窗口内压回目标」：它会把刚到的突发削掉，紧接着的低谷就没人补，直接放空。
+            startWindowMillis = 0,
+            // 也不要长期削峰：削掉的数据补不回来，只会让后续更空。
+            trimHoldMillis = 600_000,
             extraDelayMillis = it.extraDelayMillis,
             lowLatency = false,
             mediaStream = it.mediaStream,
