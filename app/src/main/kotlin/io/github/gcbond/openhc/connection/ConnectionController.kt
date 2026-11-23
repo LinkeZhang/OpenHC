@@ -91,7 +91,7 @@ class ConnectionController(context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val usbManager = app.getSystemService(Context.USB_SERVICE) as? UsbManager
     /** 信任库目录：不参与备份的应用私有目录。第一次取会建目录，所以留到调度线程上用到时再取。 */
-    private val trustDir by lazy { File(app.noBackupFilesDir, TRUST_DIR) }
+    private val trustDir by lazy { io.github.gcbond.openhc.compat.Compat.noBackupDir(app, TRUST_DIR) }
 
     private val mutableState = MutableStateFlow(ConnectionUiState())
 
@@ -751,10 +751,19 @@ class ConnectionController(context: Context) {
 
     /** 选一个空闲端口作控制监听端口（配置要求具体端口）。之后执行器在同一端口上开监听，中间被占的概率可以忽略。 */
     @Throws(IOException::class)
-    private fun pickControlPort(): Int = ServerSocket().use { probe ->
-        probe.reuseAddress = true
-        probe.bind(InetSocketAddress(InetAddress.getByAddress(ByteArray(4)), 0))
-        probe.localPort
+    private fun pickControlPort(): Int {
+        // 不能用 use{}：ServerSocket 实现 Closeable 是 API 19 才有，安卓 4.1 上会 ClassCastException。
+        val probe = ServerSocket()
+        try {
+            probe.reuseAddress = true
+            probe.bind(InetSocketAddress(InetAddress.getByAddress(ByteArray(4)), 0))
+            return probe.localPort
+        } finally {
+            try {
+                probe.close()
+            } catch (ignored: IOException) {
+            }
+        }
     }
 
     companion object {

@@ -1,8 +1,11 @@
 [versions]
-# 安卓模块统一的 SDK 版本。minSdk 23 = 安卓 6.0；无线等功能在运行时按系统版本判断是否可用。
+# 安卓模块统一的 SDK 版本。
+# android4-support 分支：minSdk 16 = 安卓 4.1。视频硬解 MediaCodec 是 API 16 起才有的，
+# 所以投屏能跑的最低版本就是 4.1（安卓 4.0 上只能连、没有画面）。
+# 主线 main 分支仍是 minSdk 23（安卓 6.0）。
 compileSdk = "36"
 targetSdk = "36"
-minSdk = "23"
+minSdk = "16"
 agp = "8.11.1"
 kotlin = "2.1.20"
 coroutines = "1.10.2"

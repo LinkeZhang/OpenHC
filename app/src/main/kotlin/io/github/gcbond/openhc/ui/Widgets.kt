@@ -1,502 +1,358 @@
 package io.github.gcbond.openhc.ui
 
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.layout.layout
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import io.github.gcbond.openhc.R
+import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.HorizontalScrollView
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 
-// 首页和设置页共用的控件。全部自己画（不用系统开关、单选框），车机主题下样子才可控。
+// 界面的配色、字号和公共控件。
+//
+// android4-support 分支：原来是 Compose 的 Material3 主题 + 一堆自定义 composable，现在全部换成
+// 系统 View + 手写 drawable。不依赖任何 UI 库，minSdk 16 就能跑。
 
-// ------------------------------------------------------------------ 页面骨架
-
-/** 页面大标题（首页的应用名、设置页的「设置」）：单行，矮屏收一档。 */
-@Composable
-internal fun PageTitle(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text,
-        style = UiType.title(LocalCompact.current),
-        color = Palette.Text,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = modifier,
-    )
+/** 配色。车机上常年开着，固定用深色，不跟系统深浅色走。 */
+internal object Palette {
+    const val Background = 0xFF111822.toInt()
+    const val Card = 0x26FFFFFF
+    const val Text = 0xFFFFFFFF.toInt()
+    const val Muted = 0xFFB0B6C0.toInt()
+    const val Accent = 0xFF8FB8FF.toInt()
+    const val Warn = 0xFFFFB74D.toInt()
+    const val On = 0xFF2D7DF6.toInt()
+    const val SwitchOff = 0xFF4A505A.toInt()
+    const val Button = 0xFF59606B.toInt()
+    const val SegmentBackground = 0x1AFFFFFF
+    const val Divider = 0x1FFFFFFF
+    const val PinBox = 0xFF565D65.toInt()
+    const val PinText = 0xFFEBF4FE.toInt()
+    const val PrimaryStart = 0xFF1590FA.toInt()
+    const val PrimaryEnd = 0xFF00ACEB.toInt()
+    const val Secondary = 0xFF365173.toInt()
+    const val Raised = 0xFF1E2632.toInt()
 }
 
-/** 右上角的「设置」「返回」：白字灰底圆角。两页的这个按钮在同一个位置。 */
-@Composable
-internal fun TopBarButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Text(
-        text,
-        style = UiType.topButton,
-        color = Palette.Text,
-        maxLines = 1,
-        modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(Palette.Button)
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 8.dp),
-    )
+/** 公共尺寸（dp 转 px 用 [dp]）。 */
+internal object Dimens {
+    /** 页面左右留白（宽屏）。 */
+    const val PageSide = 28f
+
+    /** 页面左右留白（窄屏）。 */
+    const val PageSideNarrow = 16f
+
+    /** 视口宽度到这个值算宽屏。 */
+    const val WIDE_PAGE_MIN = 900f
+
+    /** 高度低于这个值算「矮屏」（横屏车机常见）。 */
+    const val CompactHeight = 480f
 }
 
-/** 圆角卡片：首页的无线、有线两栏。 */
-@Composable
-internal fun CardBox(
-    modifier: Modifier = Modifier,
-    color: Color = Palette.Card,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Column(
-        modifier
-            .clip(RoundedCornerShape(Dimens.CardRadius))
-            .background(color)
-            .padding(Dimens.CardPadding),
-        content = content,
-    )
+internal fun Context.dp(value: Float): Int =
+    TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, resources.displayMetrics).toInt()
+
+internal fun Context.sp(value: Float): Float =
+    TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, value, resources.displayMetrics)
+
+/** 圆角实心背景。 */
+internal fun Context.roundedBackground(
+    color: Int,
+    radiusDp: Float,
+    strokeColor: Int? = null,
+    strokeDp: Float = 1f,
+): GradientDrawable = GradientDrawable().apply {
+    shape = GradientDrawable.RECTANGLE
+    cornerRadius = dp(radiusDp).toFloat()
+    setColor(color)
+    if (strokeColor != null) setStroke(dp(strokeDp), strokeColor)
 }
 
-// ------------------------------------------------------------------ 按钮
+/** 渐变胶囊背景（主按钮）。 */
+internal fun gradientPill(context: Context): GradientDrawable =
+    GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Palette.PrimaryStart, Palette.PrimaryEnd)).apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = context.dp(24f).toFloat()
+    }
 
-/** 胶囊按钮：连接相关的主要操作（开始、回到投屏画面）用蓝色渐变，次要的（停止）用灰蓝。 */
-@Composable
-internal fun PillButton(
+/** 造一个统一风格的文字控件。 */
+internal fun Context.textView(
+    text: CharSequence,
+    sizeSp: Float = 15f,
+    color: Int = Palette.Text,
+    bold: Boolean = false,
+): TextView = TextView(this).apply {
+    this.text = text
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
+    setTextColor(color)
+    if (bold) setTypeface(typeface, Typeface.BOLD)
+    includeFontPadding = false
+}
+
+/** 纵向排布。 */
+internal fun Context.column(): LinearLayout =
+    LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+/** 横向排布。 */
+internal fun Context.row(): LinearLayout =
+    LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+    }
+
+/** 页面标题（首页/设置页左上）。 */
+internal fun pageTitle(context: Context, text: String): TextView =
+    context.textView(text, sizeSp = 26f, bold = true).apply {
+        setPadding(0, context.dp(12f), 0, context.dp(4f))
+    }
+
+/** 顶栏小按钮（「设置」「返回」）。 */
+internal fun topBarButton(context: Context, text: String, onClick: () -> Unit): TextView =
+    context.textView(text, sizeSp = 14f, color = Palette.Text).apply {
+        gravity = Gravity.CENTER
+        setPadding(context.dp(16f), context.dp(9f), context.dp(16f), context.dp(9f))
+        background = context.roundedBackground(Palette.Button, 20f)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+    }
+
+/** 卡片容器：半透明底 + 圆角 + 内边距。 */
+internal fun cardBox(context: Context, content: LinearLayout): LinearLayout =
+    LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        background = context.roundedBackground(Palette.Card, 14f)
+        setPadding(context.dp(16f), context.dp(14f), context.dp(16f), context.dp(14f))
+        addView(content)
+    }
+
+/** 胶囊按钮。[primary] 为 true 时用蓝色渐变，否则用次级底色。 */
+internal fun pillButton(
+    context: Context,
     text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
     primary: Boolean = true,
     enabled: Boolean = true,
-) {
-    val brush = if (primary) {
-        Brush.horizontalGradient(listOf(Palette.PrimaryStart, Palette.PrimaryEnd))
-    } else {
-        SolidColor(Palette.Secondary)
-    }
-    Box(
-        modifier
-            .widthIn(min = if (LocalCompact.current) 150.dp else 200.dp)
-            .heightIn(min = 44.dp)
-            .alpha(if (enabled) 1f else DISABLED_ALPHA)
-            .clip(RoundedCornerShape(percent = 50))
-            .background(brush)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 24.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(text, style = UiType.pill, color = Color.White, textAlign = TextAlign.Center)
-    }
-}
-
-internal enum class ActionKind { NORMAL, PRIMARY, DANGER }
-
-/** 设置页行内的小按钮（保存、清除、粘贴等）：圆角方块。 */
-@Composable
-internal fun ActionButton(
-    text: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    kind: ActionKind = ActionKind.NORMAL,
-    enabled: Boolean = true,
-) {
-    val background = when (kind) {
-        ActionKind.NORMAL -> Palette.Button
-        ActionKind.PRIMARY -> Palette.On
-        ActionKind.DANGER -> Palette.Warn
-    }
-    Box(
-        modifier
-            .heightIn(min = 36.dp)
-            .alpha(if (enabled) 1f else DISABLED_ALPHA)
-            .clip(RoundedCornerShape(8.dp))
-            .background(background)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text,
-            style = UiType.action(LocalCompact.current),
-            color = if (kind == ActionKind.DANGER) Palette.Background else Color.White,
-        )
-    }
+): TextView = context.textView(text, sizeSp = 15f, bold = true).apply {
+    gravity = Gravity.CENTER
+    setPadding(context.dp(22f), context.dp(11f), context.dp(22f), context.dp(11f))
+    background = if (primary) gradientPill(context) else context.roundedBackground(Palette.Secondary, 24f)
+    alpha = if (enabled) 1f else 0.45f
+    isEnabled = enabled
+    isClickable = enabled
+    isFocusable = enabled
+    setOnClickListener { if (enabled) onClick() }
 }
 
-private const val DISABLED_ALPHA = 0.4f
+/** 小号操作按钮（设置行右侧）。 */
+internal fun actionButton(context: Context, text: String, onClick: () -> Unit): TextView =
+    context.textView(text, sizeSp = 13f, color = Palette.Text).apply {
+        gravity = Gravity.CENTER
+        setPadding(context.dp(14f), context.dp(7f), context.dp(14f), context.dp(7f))
+        background = context.roundedBackground(Palette.Button, 16f)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+    }
 
-// ------------------------------------------------------------------ 连接码
+/** 小标题（分组名、卡片名）。 */
+internal fun cardHeading(context: Context, text: String): TextView =
+    context.textView(text, sizeSp = 13f, color = Palette.Accent, bold = true)
 
-/** 连接码：每位一个圆角方框，字高约为方框的八成。 */
-@Composable
-internal fun PinBoxes(pin: String, box: Dp, gap: Dp, modifier: Modifier = Modifier, description: String? = null) {
-    val fontSize = with(LocalDensity.current) { (box * PIN_FONT_RATIO).toSp() }
-    val style = TextStyle(fontSize = fontSize, letterSpacing = 0.sp)
-    Row(
-        modifier.semantics(mergeDescendants = true) { if (description != null) contentDescription = description },
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        for (digit in pin) {
-            Box(
-                Modifier
-                    .padding(horizontal = gap)
-                    .size(box)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Palette.PinBox),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(digit.toString(), style = style, color = Palette.PinText, maxLines = 1)
-            }
+/** 分组框：小标题 + 一组行，行之间画细线。 */
+internal fun settingsGroup(context: Context, title: String, rows: List<View>): LinearLayout {
+    val inner = context.column()
+    inner.addView(cardHeading(context, title))
+    inner.addView(View(context).apply {
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, context.dp(8f))
+    })
+    rows.forEachIndexed { index, row ->
+        if (index > 0) {
+            inner.addView(View(context).apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
+                    topMargin = context.dp(8f)
+                    bottomMargin = context.dp(8f)
+                }
+                setBackgroundColor(Palette.Divider)
+            })
+        }
+        inner.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+    return cardBox(context, inner)
+}
+
+/** 分组里的一行：标题 + 可选说明 + 右侧控件。 */
+internal fun settingsRow(
+    context: Context,
+    title: String,
+    description: String? = null,
+    trailing: View? = null,
+    onClick: (() -> Unit)? = null,
+): LinearLayout {
+    val left = context.column().apply {
+        addView(context.textView(title, sizeSp = 15f))
+        if (description != null) {
+            addView(context.textView(description, sizeSp = 13f, color = Palette.Muted).apply {
+                setPadding(0, context.dp(3f), 0, 0)
+            })
+        }
+    }
+    return context.row().apply {
+        addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (trailing != null) {
+            addView(trailing, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                leftMargin = context.dp(12f)
+            })
+        }
+        setPadding(0, context.dp(6f), 0, context.dp(6f))
+        if (onClick != null) {
+            isClickable = true
+            setOnClickListener { onClick() }
         }
     }
 }
 
-private const val PIN_FONT_RATIO = 0.8f
-
-// ------------------------------------------------------------------ 设置页：分组与行
+/** 一行说明文字（次要色）。 */
+internal fun rowDescription(context: Context, text: String, warn: Boolean = false): TextView =
+    context.textView(text, sizeSp = 13f, color = if (warn) Palette.Warn else Palette.Muted).apply {
+        setPadding(0, context.dp(4f), 0, context.dp(4f))
+    }
 
 /**
- * 设置页的一个分组：组名只写一次，组里各行放在同一个圆角框里，行与行之间一条左侧缩进的细线。
- *
- * 行要用下面的 [SwitchRow]、[ChoiceRow]、[ValueRow]、[GroupRow]：每一行是一个根节点，自己在顶上画分隔线，
- * 分组把第一行顶上那条裁掉。不带分隔线的内容（比如直接放一个 Text）也能放，只是和上一行之间没有线。
+ * 开关行。安卓 4.1 的 Switch 控件长得比较旧，这里用自绘的「胶囊开关」保持一致外观。
  */
-@Composable
-internal fun SettingsGroup(title: String, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    val compact = LocalCompact.current
-    Column(modifier.fillMaxWidth()) {
-        Text(
-            title,
-            style = UiType.groupTitle(compact),
-            color = Palette.Accent,
-            modifier = Modifier.padding(start = 4.dp, bottom = if (compact) 6.dp else 8.dp),
-        )
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(Dimens.CardRadius))
-                .background(Palette.Card)
-                .hideFirstDivider(),
-            content = content,
-        )
-    }
-}
-
-/** 组里的一行开关：[名称 / 说明 / 提示]  [滑动开关]，整行可点。 */
-@Composable
-internal fun SwitchRow(
+internal fun switchRow(
+    context: Context,
     title: String,
-    checked: Boolean,
     description: String? = null,
-    note: String? = null,
-    noteWarn: Boolean = true,
-    onNoteClick: (() -> Unit)? = null,
-    enabled: Boolean = true,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    val compact = LocalCompact.current
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .groupDivider()
-            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange)
-            .rowPadding(compact)
-            .alpha(if (enabled) 1f else DISABLED_ALPHA),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RowTexts(title, description, note, noteWarn, onNoteClick, Modifier.weight(1f))
-        Spacer(Modifier.width(16.dp))
-        PillSwitch(checked)
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+): LinearLayout {
+    val toggle = PillSwitchView(context).apply {
+        isChecked = checked
+        setOnCheckedChange { onChange(it) }
+    }
+    return settingsRow(context, title, description, toggle)
+}
+
+/**
+ * 自绘胶囊开关：关是灰色空心，开是蓝色实心 + 白色圆点。
+ * 用 [View] 手绘，避免老版本 Switch 的样式差异。
+ */
+internal class PillSwitchView(context: Context) : View(context) {
+    var isChecked: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    private var listener: ((Boolean) -> Unit)? = null
+
+    init {
+        isClickable = true
+        isFocusable = true
+        setOnClickListener {
+            isChecked = !isChecked
+            listener?.invoke(isChecked)
+        }
+    }
+
+    fun setOnCheckedChange(l: (Boolean) -> Unit) {
+        listener = l
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(context.dp(48f), context.dp(28f))
+    }
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        val h = height.toFloat()
+        val w = width.toFloat()
+        val r = h / 2f
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        // 只有 RectF 版 drawRoundRect 是 API 1 就有的；float 版（和 Path.addRoundRect）要 API 21，
+        // 安卓 4.1 上会 NoSuchMethodError。
+        if (isChecked) {
+            paint.color = Palette.On
+            canvas.drawRoundRect(rectF(0f, 0f, w, h), r, r, paint)
+            paint.color = Color.WHITE
+            canvas.drawCircle(w - r, r, r - context.dp(3f), paint)
+        } else {
+            paint.style = android.graphics.Paint.Style.STROKE
+            paint.strokeWidth = context.dp(1.5f).toFloat()
+            paint.color = Palette.SwitchOff
+            val inset = paint.strokeWidth / 2f
+            canvas.drawRoundRect(rectF(inset, inset, w - inset, h - inset), r, r, paint)
+            paint.style = android.graphics.Paint.Style.FILL
+            paint.color = Palette.SwitchOff
+            canvas.drawCircle(r, r, r - context.dp(4f), paint)
+        }
     }
 }
 
-/** 组里的一行选项：名称 / 说明 / 提示，下面一条等宽铺满的分段选择。[selected] 为 -1 时都不高亮。 */
-@Composable
-internal fun ChoiceRow(
-    title: String,
+/** 复用一个 RectF 画圆角矩形（drawRoundRect 的 RectF 重载是 API 1 就有）。 */
+private fun rectF(l: Float, t: Float, r: Float, b: Float): android.graphics.RectF =
+    android.graphics.RectF(l, t, r, b)
+
+/**
+ * 分段选择（一排互斥选项）。
+ *
+ * 安卓 4.1 没有 Material 的 SegmentedButton，这里用一排 TextView 手写：
+ * 选中的那个用主色底，其余透明。
+ */
+internal fun segmented(
+    context: Context,
     options: List<String>,
     selected: Int,
-    description: String? = null,
-    note: String? = null,
     onSelect: (Int) -> Unit,
-) {
-    val compact = LocalCompact.current
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .groupDivider()
-            .rowPadding(compact),
-    ) {
-        RowTexts(title, description, note, true, null, Modifier)
-        Spacer(Modifier.height(if (compact) 8.dp else 10.dp))
-        Segmented(options, selected, onSelect)
+): LinearLayout {
+    val row = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        background = context.roundedBackground(Palette.SegmentBackground, 10f)
+        setPadding(context.dp(3f), context.dp(3f), context.dp(3f), context.dp(3f))
     }
-}
-
-/** 组里的一行数值：[名称 / 说明]  [当前值 ›]，整行可点（点了去改）。 */
-@Composable
-internal fun ValueRow(
-    title: String,
-    value: String,
-    description: String? = null,
-    valueColor: Color = Palette.Text,
-    monospace: Boolean = false,
-    note: String? = null,
-    onClick: () -> Unit,
-) {
-    val compact = LocalCompact.current
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .groupDivider()
-            .clickable(role = Role.Button, onClick = onClick)
-            .rowPadding(compact),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RowTexts(title, description, note, true, null, Modifier.weight(1f))
-        Text(
-            value,
-            style = if (monospace) UiType.value(compact) else UiType.option(compact),
-            color = valueColor,
-            maxLines = 1,
-            modifier = Modifier.padding(start = 16.dp),
-        )
-        Text("›", style = UiType.chevron(compact), color = Palette.Muted, modifier = Modifier.padding(start = 8.dp))
-    }
-}
-
-/** 组里自由排版的一行（列表、输入框、几个按钮）：和别的行一样的内边距和分隔线。[spacing] 是里面各块之间的距离。 */
-@Composable
-internal fun GroupRow(modifier: Modifier = Modifier, spacing: Dp = 0.dp, content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier
-            .fillMaxWidth()
-            .groupDivider()
-            .rowPadding(LocalCompact.current),
-        verticalArrangement = Arrangement.spacedBy(spacing),
-        content = content,
-    )
-}
-
-/** 行里的小标题（名称那一级）。 */
-@Composable
-internal fun RowTitle(text: String, modifier: Modifier = Modifier, color: Color = Palette.Text) {
-    Text(text, style = UiType.rowTitle(LocalCompact.current), color = color, modifier = modifier)
-}
-
-/** 行里的说明文字。 */
-@Composable
-internal fun RowDescription(text: String, modifier: Modifier = Modifier, color: Color = Palette.Muted) {
-    Text(text, style = UiType.rowDesc(LocalCompact.current), color = color, modifier = modifier)
-}
-
-/** 行里的提示：默认琥珀色加粗（要用户注意的）；[warn] 为 false 时是普通说明的样子。可点时点它去处理。 */
-@Composable
-internal fun RowNote(text: String, warn: Boolean = true, onClick: (() -> Unit)? = null) {
-    val compact = LocalCompact.current
-    Text(
-        text,
-        style = if (warn) UiType.rowNote(compact) else UiType.rowDesc(compact),
-        color = if (warn) Palette.Warn else Palette.Muted,
-        modifier = Modifier
-            .padding(top = 3.dp)
-            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier),
-    )
-}
-
-/**
- * 行里的名称和文字：解释性的文字（说明、非警告的附注）收进标题后的「?」，点开才显示；
- * 警告和可点的附注照常显示，免得车主漏看要处理的事。
- */
-@Composable
-private fun RowTexts(
-    title: String,
-    description: String?,
-    note: String?,
-    noteWarn: Boolean,
-    onNoteClick: (() -> Unit)?,
-    modifier: Modifier,
-) {
-    val noteInHelp = note != null && !noteWarn && onNoteClick == null
-    val help = listOfNotNull(description, note.takeIf { noteInHelp }).joinToString("\n").ifEmpty { null }
-    Column(modifier) {
-        RowHeader(title, help)
-        if (note != null && !noteInHelp) RowNote(note, noteWarn, onNoteClick)
-    }
-}
-
-/**
- * 行的名称；有说明时名称后面跟一个「?」：说明平时收起，点「?」展开、再点收起（每行各自记）。
- * 「?」自己可点，点它不会触发整行的开关或跳转。
- */
-@Composable
-internal fun RowHeader(title: String, help: String?, modifier: Modifier = Modifier) {
-    var shown by rememberSaveable(help) { mutableStateOf(false) }
-    Column(modifier) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            RowTitle(title, Modifier.weight(1f, fill = false))
-            if (help != null) HelpButton(shown) { shown = !shown }
+    options.forEachIndexed { index, label ->
+        val cell = context.textView(label, sizeSp = 13f, color = if (index == selected) Palette.Text else Palette.Muted).apply {
+            gravity = Gravity.CENTER
+            setPadding(context.dp(10f), context.dp(7f), context.dp(10f), context.dp(7f))
+            if (index == selected) background = context.roundedBackground(Palette.On, 8f)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { if (index != selected) onSelect(index) }
         }
-        if (help != null && shown) RowDescription(help, Modifier.padding(top = 2.dp))
+        row.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
+    return row
 }
 
-/** 「?」按钮：圆圈里一个问号，展开时填蓝。可点区域比圆圈大一圈，车上好点。 */
-@Composable
-private fun HelpButton(shown: Boolean, onClick: () -> Unit) {
-    val compact = LocalCompact.current
-    val label = stringResource(R.string.row_help)
-    val state = stringResource(if (shown) R.string.row_help_shown else R.string.row_help_hidden)
-    Box(
-        Modifier
-            .padding(start = 4.dp)
-            .size(if (compact) 28.dp else 32.dp)
-            .clip(CircleShape)
-            .clickable(role = Role.Button, onClick = onClick)
-            .semantics {
-                contentDescription = label
-                stateDescription = state
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            Modifier
-                .size(if (compact) 18.dp else 20.dp)
-                .clip(CircleShape)
-                .background(if (shown) Palette.On else Color.Transparent)
-                .border(1.dp, if (shown) Palette.On else Palette.Muted, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                "?",
-                style = UiType.rowDesc(compact).copy(fontWeight = FontWeight.Bold, lineHeight = UiType.rowDesc(compact).fontSize),
-                color = if (shown) Color.White else Palette.Muted,
-                maxLines = 1,
-            )
-        }
+/** 连接码方框：一位一个框。 */
+internal fun pinBoxes(context: Context, pin: String, boxDp: Float, gapDp: Float): LinearLayout {
+    val row = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
     }
-}
-
-/** 滑动开关：开 = 蓝色轨道、圆点在右；关 = 灰色轨道、圆点在左。 */
-@Composable
-private fun PillSwitch(checked: Boolean) {
-    val compact = LocalCompact.current
-    val knob = if (compact) 20.dp else 24.dp
-    val trackWidth = if (compact) 42.dp else 50.dp
-    val inset = 3.dp
-    val x by animateDpAsState(if (checked) trackWidth - knob - inset else inset, label = "开关圆点")
-    Box(
-        Modifier
-            .size(trackWidth, knob + inset * 2)
-            .clip(RoundedCornerShape(percent = 50))
-            .background(if (checked) Palette.On else Palette.SwitchOff),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Box(
-            Modifier
-                .offset { IntOffset(x.roundToPx(), 0) }
-                .size(knob)
-                .clip(CircleShape)
-                .background(Color.White),
-        )
+    pin.forEachIndexed { index, ch ->
+        row.addView(context.textView(ch.toString(), sizeSp = 22f, color = Palette.PinText, bold = true).apply {
+            gravity = Gravity.CENTER
+            background = context.roundedBackground(Palette.PinBox, 8f)
+        }, LinearLayout.LayoutParams(context.dp(boxDp), context.dp(boxDp)).apply {
+            if (index > 0) leftMargin = context.dp(gapDp)
+        })
     }
+    return row
 }
 
-/** 等宽分段选择：选中的那段蓝底白字加粗，其余灰字。 */
-@Composable
-private fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
-    val compact = LocalCompact.current
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(Palette.SegmentBackground)
-            .padding(3.dp)
-            .selectableGroup(),
-    ) {
-        options.forEachIndexed { index, label ->
-            val on = index == selected
-            Box(
-                Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(if (on) Palette.On else Color.Transparent)
-                    .selectable(selected = on, role = Role.RadioButton) { onSelect(index) }
-                    .padding(horizontal = 4.dp, vertical = if (compact) 5.dp else 7.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    label,
-                    style = UiType.option(compact).copy(fontWeight = if (on) FontWeight.Bold else FontWeight.Normal),
-                    color = if (on) Palette.Text else Palette.Muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
+/** 整页纵向滚动容器。 */
+internal fun scrollPage(context: Context, content: View): ScrollView =
+    ScrollView(context).apply {
+        isFillViewport = true
+        setBackgroundColor(Palette.Background)
+        addView(content)
     }
-}
-
-private fun Modifier.rowPadding(compact: Boolean) =
-    padding(horizontal = 16.dp, vertical = if (compact) 9.dp else 12.dp)
-
-/** 在这一行顶上画分隔线（左侧缩进 16dp、1 像素）。 */
-internal fun Modifier.groupDivider(): Modifier = drawBehind {
-    val inset = DIVIDER_INSET.toPx()
-    drawRect(Palette.Divider, topLeft = Offset(inset, 0f), size = Size((size.width - inset).coerceAtLeast(0f), 1f))
-}
-
-/** 分组框把内容往上挪 1 像素、高度少报 1 像素，加上圆角裁剪，第一行顶上那条分隔线就看不见了。 */
-private fun Modifier.hideFirstDivider(): Modifier = layout { measurable, constraints ->
-    val placeable = measurable.measure(constraints)
-    layout(placeable.width, (placeable.height - 1).coerceAtLeast(0)) { placeable.place(0, -1) }
-}
-
-private val DIVIDER_INSET = 16.dp

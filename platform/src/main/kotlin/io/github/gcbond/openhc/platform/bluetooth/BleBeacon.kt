@@ -24,6 +24,7 @@ import java.util.UUID
  *
  * 权限：安卓 12 起要「附近的设备」里的广播权限（BLUETOOTH_ADVERTISE），更早是清单里的普通蓝牙权限；没有时报 onFailed。
  */
+@android.annotation.TargetApi(android.os.Build.VERSION_CODES.LOLLIPOP)
 class BleBeacon(
     private val adapter: BluetoothAdapter,
     private val serviceDataUuid: UUID,
@@ -157,6 +158,11 @@ class BleBeacon(
          * 系统在蓝牙关着时一律报不支持，所以先确认蓝牙开着再问。
          */
         fun support(adapter: BluetoothAdapter?): Support {
+            // BLE 广播（BluetoothLeAdvertiser / AdvertiseData 等）整套是 API 21 才有；
+            // 安卓 4.1～4.4 上直接报不支持，调用方不会去实例化本类。
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP) {
+                return Support.Unavailable("安卓 5.0 以前没有 BLE 广播接口")
+            }
             if (adapter == null) return Support.Unavailable("没有蓝牙")
             val on = try {
                 adapter.isEnabled

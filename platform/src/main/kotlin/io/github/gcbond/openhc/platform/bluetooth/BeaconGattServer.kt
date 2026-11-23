@@ -29,6 +29,7 @@ import java.util.ArrayDeque
  *
  * 权限：安卓 12 起要「附近的设备」权限（BLUETOOTH_CONNECT），没有时报 onFailed。
  */
+@android.annotation.TargetApi(android.os.Build.VERSION_CODES.LOLLIPOP)
 class BeaconGattServer(
     context: Context,
     private val events: Events,
@@ -62,6 +63,10 @@ class BeaconGattServer(
         synchronized(lock) {
             check(!started) { "open 只能调用一次" }
             started = true
+        }
+        // GATT 服务端是 API 18 才有；安卓 4.1～4.4 上直接报开不了。
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            return fail("安卓 4.3 以前没有 GATT 服务端接口")
         }
         val manager = app.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             ?: return fail("没有蓝牙服务")

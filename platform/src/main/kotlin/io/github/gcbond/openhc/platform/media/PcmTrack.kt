@@ -48,24 +48,18 @@ object PcmTrack {
             rejection = "声道 $choice 号被系统拒绝（${why?.javaClass?.simpleName}：${why?.message}），改按用途建"
         }
         val attrs = usage.trackAttributes()
-        val builder = AudioTrack.Builder()
-            .setAudioAttributes(attrs.attributes)
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(channelMask)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .build(),
-            )
-            .setBufferSizeInBytes(bufferBytes)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-        var lowLatencyRequested = false
-        // 安卓 8.0 以下没有性能模式，照常建（走系统默认的输出路径）。
-        if (lowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-            lowLatencyRequested = true
-        }
-        val track = builder.build()
+        // AudioAttributes / AudioTrack.Builder 是 API 21 起；安卓 4.1 上 PlatformCompat 会退回老构造
+        // AudioTrack(streamType, …)，用途换算成对应的 streamType（见 AudioUsage.legacyStreamType）。
+        val lowLatencyRequested = lowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        val track = io.github.gcbond.openhc.platform.compat.PlatformCompat.newTrack(
+            usage = attrs.usage,
+            contentType = attrs.contentType,
+            streamType = usage.legacyStreamType(),
+            sampleRate = sampleRate,
+            channelMask = channelMask,
+            bufferBytes = bufferBytes,
+            lowLatency = lowLatency,
+        )
         if (track.state != AudioTrack.STATE_INITIALIZED) {
             track.release()
             throw IllegalStateException("AudioTrack 没有初始化成功")

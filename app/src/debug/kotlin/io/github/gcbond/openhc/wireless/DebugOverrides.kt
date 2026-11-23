@@ -12,9 +12,8 @@ internal object DebugOverrides {
 
     private fun property(key: String): String = try {
         Class.forName("android.os.SystemProperties").getMethod("get", String::class.java).invoke(null, key) as? String ?: ""
-    } catch (e: ReflectiveOperationException) {
-        ""
-    } catch (e: RuntimeException) {
+    } catch (e: Exception) {
+        // ReflectiveOperationException 是 API 19 才有，安卓 4.1 上 catch 它本身会 NoClassDefFoundError，所以抓宽一点。
         ""
     }
 }

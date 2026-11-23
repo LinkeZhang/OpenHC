@@ -1,23 +1,12 @@
 package io.github.gcbond.openhc.ui
 
 import android.graphics.Bitmap
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.res.stringResource
+import android.widget.ImageView
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
-import io.github.gcbond.openhc.R
 
 /** 二维码编码（ZXing，Apache-2.0）。纯逻辑，由 JVM 单元测试覆盖。 */
 internal object QrCodes {
@@ -34,32 +23,30 @@ internal object QrCodes {
         // 宽高给 0：按最小尺寸出，一个模块一个点，放大交给界面。
         return QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, 0, 0, hints)
     }
+
+    /**
+     * 编成 [sizePx] 见方的位图，白底黑块。
+     *
+     * 老车机屏幕分辨率低，放大时不做平滑（[ImageView] 上设 filterBitmap = false），
+     * 让模块边缘保持锐利，扫码更容易成功。
+     */
+    fun bitmap(content: String, sizePx: Int, margin: Int = 2): Bitmap {
+        val matrix = encode(content, margin)
+        val modules = matrix.width
+        val pixels = IntArray(sizePx * sizePx)
+        for (y in 0 until sizePx) {
+            val my = y * modules / sizePx
+            for (x in 0 until sizePx) {
+                val mx = x * modules / sizePx
+                pixels[y * sizePx + x] = if (matrix.get(mx, my)) BLACK else WHITE
+            }
+        }
+        return Bitmap.createBitmap(pixels, sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    }
+
+    /** 不透明黑（ARGB 0xFF000000）。 */
+    private const val BLACK = -0x1000000
+
+    /** 不透明白（ARGB 0xFFFFFFFF）。 */
+    private const val WHITE = -1
 }
-
-/**
- * 显示二维码：白底黑块，不随深色模式反色（反色了很多手机扫不出来）；放大时不做平滑，边缘保持清楚。
- */
-@Composable
-internal fun QrCodeImage(content: String, modifier: Modifier = Modifier) {
-    val bitmap = remember(content) { QrCodes.encode(content).toImageBitmap() }
-    Image(
-        bitmap = bitmap,
-        contentDescription = stringResource(R.string.wireless_qr_description),
-        modifier = modifier.background(Color.White),
-        contentScale = ContentScale.Fit,
-        filterQuality = FilterQuality.None,
-    )
-}
-
-private fun BitMatrix.toImageBitmap(): ImageBitmap {
-    val w = width
-    val h = height
-    val pixels = IntArray(w * h) { i -> if (get(i % w, i / w)) BLACK else WHITE }
-    return Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888).asImageBitmap()
-}
-
-/** 不透明黑（ARGB 0xFF000000）。 */
-private const val BLACK = -0x1000000
-
-/** 不透明白（ARGB 0xFFFFFFFF）。 */
-private const val WHITE = -1

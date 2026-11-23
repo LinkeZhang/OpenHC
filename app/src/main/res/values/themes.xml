@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    android4-support 分支（minSdk 16）的兜底主题。
+    Theme.Material 是 API 21 才有的，安卓 4.1 上引用它会直接解析失败、应用装不上/闪退。
+    这里用 Holo（API 11 起就有）的无标题栏版本；values-v21 里会覆盖成 Material。
+    界面本身全是自绘 View，主题只影响窗口背景和标题栏，不影响观感。
+-->
+<resources>
+    <style name="AppTheme" parent="@android:style/Theme.Holo.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

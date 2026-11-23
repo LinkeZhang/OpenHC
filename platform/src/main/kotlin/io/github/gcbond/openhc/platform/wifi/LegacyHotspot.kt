@@ -110,7 +110,7 @@ object LegacyHotspot {
     fun state(manager: WifiManager): Int = try {
         val method = WifiManager::class.java.getMethod("getWifiApState")
         method.invoke(manager) as? Int ?: -1
-    } catch (e: ReflectiveOperationException) {
+    } catch (e: Exception) {
         -1
     } catch (e: RuntimeException) {
         -1
@@ -120,7 +120,7 @@ object LegacyHotspot {
     fun currentConfiguration(manager: WifiManager): WifiConfiguration? = try {
         val method = WifiManager::class.java.getMethod("getWifiApConfiguration")
         method.invoke(manager) as? WifiConfiguration
-    } catch (e: ReflectiveOperationException) {
+    } catch (e: Exception) {
         null
     } catch (e: RuntimeException) {
         null

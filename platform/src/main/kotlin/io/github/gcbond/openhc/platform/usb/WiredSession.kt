@@ -401,7 +401,15 @@ class WiredSession(
         ACTIVE.compareAndSet(this, null)
         log("会话结束：$reason${detail?.let { "（$it）" } ?: ""}")
         setState(WiredState.Ended(reason, replugRequired = carInfoSent, detail = detail))
-        thread?.quitSafely()
+        // quitSafely 是 API 18 才有；安卓 4.1 上用 quit()（同样会处理完已投递的消息再退出）。
+        thread?.let { t ->
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                t.quitSafely()
+            } else {
+                @Suppress("DEPRECATION")
+                t.quit()
+            }
+        }
     }
 
     // ---------------------------------------------------------------- 工具

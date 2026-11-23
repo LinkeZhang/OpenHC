@@ -121,7 +121,7 @@ class WirelessController(
     private val worker = HandlerThread("OpenHC-Wireless").also { it.start() }
     private val handler = Handler(worker.looper)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val trustDir by lazy { File(app.noBackupFilesDir, TRUST_DIR) }
+    private val trustDir by lazy { io.github.gcbond.openhc.compat.Compat.noBackupDir(app, TRUST_DIR) }
 
     private val mutableState = MutableStateFlow(WirelessUiState())
 
@@ -746,7 +746,7 @@ class WirelessController(
         (android.bluetooth.BluetoothDevice::class.java.getMethod("isConnected").invoke(device) as? Boolean).also {
             Log.i(TAG, "手机蓝牙连着车机：$it（${MacText.mask(address)}）")
         }
-    } catch (e: ReflectiveOperationException) {
+    } catch (e: Exception) {
         Log.i(TAG, "查不到手机蓝牙连没连着（${e.javaClass.simpleName}）")
         null
     } catch (e: RuntimeException) {

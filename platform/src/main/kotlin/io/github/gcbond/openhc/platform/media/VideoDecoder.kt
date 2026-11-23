@@ -295,7 +295,13 @@ class VideoDecoder @JvmOverloads constructor(
 
     private val thread = HandlerThread("OpenHC-VideoDecoder").also { it.start() }
     private val handler = Handler(thread.looper)
-    private val codecCallback = CodecCallback()
+    /** 异步模式的回调对象。`MediaCodec.Callback` 是 API 21 才有，安卓 4.1～4.4 上不建（走同步轮询）。 */
+    private val codecCallback: CodecCallback? by lazy {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) CodecCallback() else null
+    }
+
+    /** 安卓 4.1 同步轮询复用的 BufferInfo（避免每帧分配）。 */
+    private val legacyInfo = MediaCodec.BufferInfo()
     private val renderListener = MediaCodec.OnFrameRenderedListener { c, _, _ ->
         if (c === codec && !outputOnPlaceholder) stats.onRendered()
     }
@@ -306,14 +312,27 @@ class VideoDecoder @JvmOverloads constructor(
     private val tick = object : Runnable {
         override fun run() {
             if (closed) return
+            // 安卓 4.1 没有 setCallback，解码靠这个循环轮询驱动。
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) pumpLegacy()
             onTick()
-            handler.postDelayed(this, options.statsIntervalMs)
+            // 低版本轮询要密一些（解码线程没有回调叫醒，全靠这里），高版本只是统计节拍。
+            handler.postDelayed(this, if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) LEGACY_TICK_MS else options.statsIntervalMs)
+        }
+    }
+
+    /** 安卓 4.1 的轮询入口：在解码线程上跑，拿锁、取当前解码器、排空一遍。 */
+    private fun pumpLegacy() {
+        lock.withLock {
+            val c = codec ?: return
+            if (flushing || c === retiringCodec) return
+            drainLegacyLocked(c)
         }
     }
 
     init {
         stats.start(now())
-        handler.postDelayed(tick, options.statsIntervalMs)
+        // 安卓 4.1 的轮询从第一次 tick 开始，要立刻起，不能等一个统计周期（默认 1 秒）。
+        handler.postDelayed(tick, if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) 0L else options.statsIntervalMs)
     }
 
     /**
@@ -436,7 +455,13 @@ class VideoDecoder @JvmOverloads constructor(
         handler.removeCallbacksAndMessages(null)
         // 刷新回调登记在解码线程的 Choreographer 上，也在那个线程上撤掉（退出前会执行已经到时的消息）。
         handler.post { choreographer?.removeFrameCallback(vsyncCallback) }
-        thread.quitSafely()
+        // quitSafely 是 API 18 才有；安卓 4.1 上用 quit()。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            thread.quitSafely()
+        } else {
+            @Suppress("DEPRECATION")
+            thread.quit()
+        }
         Log.i(TAG, "视频解码器已关闭")
     }
 
@@ -554,7 +579,8 @@ class VideoDecoder @JvmOverloads constructor(
         val config = cache.isConfig(seq)
         val replay = cache.isReplay(seq)
         val buffer: ByteBuffer? = try {
-            c.getInputBuffer(index)
+            // getInputBuffer 是 API 21 才有，4.1 上 PlatformCompat 退回 getInputBuffers()[index]。
+            io.github.gcbond.openhc.platform.compat.PlatformCompat.inputBuffer(c, index)
         } catch (e: IllegalStateException) {
             null
         }
@@ -832,7 +858,10 @@ class VideoDecoder @JvmOverloads constructor(
             }
         }
         Log.e(TAG, "没有能用的 H.264 解码器（${sps.width}x${sps.height}）")
-        if (placeholder?.surface === surface) closePlaceholderLocked()
+        // placeholder 只在 API 19+ 才建得出来（见 placeholderLocked），低版本这里恒为 null。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT && placeholder?.surface === surface) {
+            closePlaceholderLocked()
+        }
         val detail = "${sps.width}x${sps.height}"
         notifyListener { onDecoderUnavailable(detail) }
         requireSyncLocked(ResyncReason.DECODER_ERROR)
@@ -854,19 +883,68 @@ class VideoDecoder @JvmOverloads constructor(
     }
 
     private fun startCodec(c: MediaCodec, format: MediaFormat, surface: Surface, tier: Int): Boolean = try {
-        c.setCallback(codecCallback, handler)
-        try {
-            c.setOnFrameRenderedListener(renderListener, handler)
-        } catch (e: RuntimeException) {
-            // 上屏回调只用于统计，注册不上就不统计上屏帧数，不影响解码。
-            Log.w(TAG, "解码器 ${c.name} 不支持上屏回调：${e.message}")
+        // setCallback 是 API 21 才有。安卓 4.1 上只能在输出缓冲上轮询（见 drainLegacyLocked），
+        // 不注册回调；上屏帧数统计也一并关掉（它只影响统计，不影响画面）。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            // 带 Handler 的重载是 API 23 才有；21～22 用无参重载，它在本线程（解码线程，有 Looper）上回调。
+            val callback = codecCallback ?: return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                c.setCallback(callback, handler)
+            } else {
+                c.setCallback(callback)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    c.setOnFrameRenderedListener(renderListener, handler)
+                } catch (e: RuntimeException) {
+                    // 上屏回调只用于统计，注册不上就不统计上屏帧数，不影响解码。
+                    Log.w(TAG, "解码器 ${io.github.gcbond.openhc.platform.compat.PlatformCompat.codecName(c)} 不支持上屏回调：${e.message}")
+                }
+            }
         }
         c.configure(format, surface, null, 0)
         c.start()
         true
     } catch (e: RuntimeException) {
-        Log.w(TAG, "解码器 ${c.name} 配置失败（档位 $tier）：${e.message}")
+        Log.w(TAG, "解码器 ${io.github.gcbond.openhc.platform.compat.PlatformCompat.codecName(c)} 配置失败（档位 $tier）：${e.message}")
         false
+    }
+
+    /**
+     * 安卓 4.1（API 16～20）的同步轮询：没有 `MediaCodec.setCallback`（API 21），只能自己在解码线程上
+     * 反复 `dequeueInputBuffer` / `dequeueOutputBuffer`，再把结果喂给和异步模式同一套的 onInputAvailable /
+     * onOutputAvailable / onFormatChanged。
+     *
+     * 只在解码线程上调用（由 [tick] 驱动）。每次最多等 [LEGACY_POLL_US] 微秒，不长时间占住线程，
+     * 好让 handler 上的其他任务（统计、节拍、关闭）及时跑。
+     */
+    private fun drainLegacyLocked(c: MediaCodec) {
+        // 输入：有空的就交给 pumpLocked 去填。
+        while (true) {
+            val index = try {
+                c.dequeueInputBuffer(0)
+            } catch (e: IllegalStateException) {
+                return
+            }
+            if (index < 0) break
+            onInputAvailable(c, index)
+        }
+        // 输出：取一帧处理一帧，直到没有了。
+        val info = legacyInfo
+        while (true) {
+            val index = try {
+                c.dequeueOutputBuffer(info, LEGACY_POLL_US)
+            } catch (e: IllegalStateException) {
+                return
+            }
+            when {
+                index >= 0 -> onOutputAvailable(c, index, info)
+                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> onFormatChanged(c, c.outputFormat)
+                // INFO_OUTPUT_BUFFERS_CHANGED（API 21 起废弃）只是提示缓冲数组换了，4.x 上重新取一次即可；
+                // INFO_TRY_AGAIN_LATER 表示暂时没有，都继续轮询。
+                else -> if (index == MediaCodec.INFO_TRY_AGAIN_LATER) break
+            }
+        }
     }
 
     /**
@@ -902,7 +980,7 @@ class VideoDecoder @JvmOverloads constructor(
 
     private fun installLocked(c: MediaCodec, sps: H264Sps, decodeOrder: Boolean, surface: Surface, tier: Int) {
         codec = c
-        codecName = c.name
+        codecName = io.github.gcbond.openhc.platform.compat.PlatformCompat.codecName(c)
         codecSps = sps
         codecDecodeOrder = decodeOrder
         retiringCodec = null
@@ -916,7 +994,7 @@ class VideoDecoder @JvmOverloads constructor(
         stats.onDecoderReset(installedAtMs)
         Log.i(
             TAG,
-            "解码器 ${c.name} 已启动：${sps.width}x${sps.height}，profile ${sps.profileIdc}，档位 $tier，" +
+            "解码器 ${io.github.gcbond.openhc.platform.compat.PlatformCompat.codecName(c)} 已启动：${sps.width}x${sps.height}，profile ${sps.profileIdc}，档位 $tier，" +
                 "按解码顺序输出=$decodeOrder，输出到${if (outputOnPlaceholder) "占位 Surface" else "视图 Surface"}，" +
                 "上屏节拍${if (framePacing) "开" else "关"}",
         )
@@ -1017,8 +1095,12 @@ class VideoDecoder @JvmOverloads constructor(
      * 占位 Surface：一个私有格式的 ImageReader。在它上面时出帧不送显，解码器只是照常解码、维持参考帧；
      * 万一有帧送过来，取出来直接丢掉，免得占住缓冲。
      */
+    @android.annotation.TargetApi(Build.VERSION_CODES.KITKAT)
     private fun placeholderLocked(width: Int, height: Int): Surface? {
         placeholder?.let { return it.surface }
+        // ImageReader 是 API 19 才有。安卓 4.1～4.2 上没有占位 Surface：
+        // 只有在「视图 Surface 还没到手就先解码」这条路上才需要它，那时退回不解码、等 Surface（见 outputSurfaceLocked）。
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.KITKAT) return null
         return try {
             val reader = ImageReader.newInstance(width, height, ImageFormat.PRIVATE, PLACEHOLDER_IMAGES)
             reader.setOnImageAvailableListener({ r ->
@@ -1036,6 +1118,7 @@ class VideoDecoder @JvmOverloads constructor(
         }
     }
 
+    @android.annotation.TargetApi(Build.VERSION_CODES.KITKAT)
     private fun closePlaceholderLocked() {
         val reader = placeholder ?: return
         placeholder = null
@@ -1046,12 +1129,16 @@ class VideoDecoder @JvmOverloads constructor(
         }
     }
 
-    private fun switchOutputLocked(c: MediaCodec, target: Surface): Boolean = try {
-        c.setOutputSurface(target)
-        true
-    } catch (e: RuntimeException) {
-        Log.w(TAG, "切换输出 Surface 失败：${e.message}")
-        false
+    private fun switchOutputLocked(c: MediaCodec, target: Surface): Boolean {
+        // setOutputSurface 是 API 23 才有；更低的版本换不了输出面，只能重建解码器（返回 false 让调用方重建）。
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        return try {
+            c.setOutputSurface(target)
+            true
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "切换输出 Surface 失败：${e.message}")
+            false
+        }
     }
 
     private fun releaseQuietly(c: MediaCodec) {
@@ -1083,20 +1170,35 @@ class VideoDecoder @JvmOverloads constructor(
 
     // ---------------------------------------------------------------- 解码线程
 
+    // 只在 API 21+ 实例化（见 codecCallback 的惰性初始化），4.x 走同步轮询。
+    @android.annotation.TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private inner class CodecCallback : MediaCodec.Callback() {
-        override fun onInputBufferAvailable(c: MediaCodec, index: Int) {
-            lock.withLock {
-                if (c !== codec || flushing) return
-                if (!firstInputSeen) {
-                    firstInputSeen = true
-                    Log.i(TAG, "解码器启动后 ${now() - installedAtMs}ms 给出第一个输入缓冲")
-                }
-                freeInputs.addLast(index)
-                pumpLocked()
-            }
-        }
+        override fun onInputBufferAvailable(c: MediaCodec, index: Int) = onInputAvailable(c, index)
 
-        override fun onOutputBufferAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+        override fun onOutputBufferAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) =
+            onOutputAvailable(c, index, info)
+
+        override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) = onFormatChanged(c, format)
+
+        override fun onError(c: MediaCodec, e: MediaCodec.CodecException) = onCodecError(c, e)
+    }
+
+    // 下面这几个是回调的实际内容。异步模式（API 21+）由 CodecCallback 调用，
+    // 安卓 4.1 上由 drainLegacyLocked 的同步轮询调用，两条路径共用同一套逻辑。
+
+    private fun onInputAvailable(c: MediaCodec, index: Int) {
+        lock.withLock {
+            if (c !== codec || flushing) return
+            if (!firstInputSeen) {
+                firstInputSeen = true
+                Log.i(TAG, "解码器启动后 ${now() - installedAtMs}ms 给出第一个输入缓冲")
+            }
+            freeInputs.addLast(index)
+            pumpLocked()
+        }
+    }
+
+    private fun onOutputAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
             if (c !== codec || flushing) return
             if (outputCodec !== c) {
                 // 扣着的是上一个解码器的输出，序号已经失效。
@@ -1132,7 +1234,7 @@ class VideoDecoder @JvmOverloads constructor(
             }
         }
 
-        override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) {
+    private fun onFormatChanged(c: MediaCodec, format: MediaFormat) {
             if (c !== codec) return
             // 只认带裁剪信息的尺寸；没有裁剪信息时宽高可能是按宏块对齐的编码尺寸，以 SPS 为准。
             val size = try {
@@ -1151,15 +1253,16 @@ class VideoDecoder @JvmOverloads constructor(
             if (size != null && size.first > 0 && size.second > 0) updateVideoSize(size.first, size.second)
         }
 
-        override fun onError(c: MediaCodec, e: MediaCodec.CodecException) {
-            if (e.isTransient) {
-                Log.w(TAG, "解码器暂时性错误，继续：${e.diagnosticInfo}")
+    private fun onCodecError(c: MediaCodec, e: MediaCodec.CodecException) {
+            // isTransient / isRecoverable 是 API 21 才有；低版本按「不可恢复」处理（换解码器重来最稳）。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && e.isTransient) {
+                Log.w(TAG, "解码器暂时性错误，继续：${io.github.gcbond.openhc.platform.compat.PlatformCompat.codecErrorDetail(e)}")
                 return
             }
-            Log.w(TAG, "解码器出错（可恢复=${e.isRecoverable}）：${e.diagnosticInfo}")
+            val recoverable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && e.isRecoverable
+            Log.w(TAG, "解码器出错（可恢复=$recoverable）：${io.github.gcbond.openhc.platform.compat.PlatformCompat.codecErrorDetail(e)}")
             // 不在 MediaCodec 的回调里直接释放它，排到回调返回之后。
             lock.withLock { retireLocked(c, ResyncReason.DECODER_ERROR) }
-        }
     }
 
     private fun onTick() {
@@ -1226,6 +1329,12 @@ class VideoDecoder @JvmOverloads constructor(
 
     private companion object {
         const val TAG = "OpenHC-Video"
+
+        /** 安卓 4.1 轮询时 dequeueOutputBuffer 的单次等待（微秒）。 */
+        const val LEGACY_POLL_US = 2_000L
+
+        /** 安卓 4.1 轮询的间隔（毫秒）：约 120 Hz，比 60 fps 的帧率快，不会因为轮询慢而积压。 */
+        const val LEGACY_TICK_MS = 8L
 
         const val TIER_FULL = 0
         const val TIER_STANDARD = 1

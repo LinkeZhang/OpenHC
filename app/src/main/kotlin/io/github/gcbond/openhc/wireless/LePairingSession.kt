@@ -209,7 +209,8 @@ internal class LePairingSession(context: Context) {
             "?"
         }
         val type = try {
-            when (device.type) {
+            // getType 是 API 18 才有，安卓 4.1 上 Compat 返回 DEVICE_TYPE_UNKNOWN。
+            when (io.github.gcbond.openhc.compat.Compat.bluetoothDeviceType(device)) {
                 BluetoothDevice.DEVICE_TYPE_CLASSIC -> "经典"
                 BluetoothDevice.DEVICE_TYPE_LE -> "LE"
                 BluetoothDevice.DEVICE_TYPE_DUAL -> "双模"

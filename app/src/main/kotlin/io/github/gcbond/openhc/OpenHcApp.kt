@@ -1,6 +1,7 @@
 package io.github.gcbond.openhc
 
 import android.app.Application
+import android.content.Context
 import io.github.gcbond.openhc.connection.ConnectionController
 import io.github.gcbond.openhc.connection.Phase
 import io.github.gcbond.openhc.settings.DiagnosticLog
@@ -10,6 +11,15 @@ import io.github.gcbond.openhc.wireless.LePairingNames
 import io.github.gcbond.openhc.wireless.WirelessController
 
 class OpenHcApp : Application() {
+
+    /**
+     * 安卓 4.1～4.4 要先装 MultiDex 才能加载第二个 dex（方法数超过 64K）。
+     * 5.0 起系统自带多 dex，[MultiDex.install] 内部会自己跳过。
+     */
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        androidx.multidex.MultiDex.install(this)
+    }
 
     /** 有线投屏的总调度，进程内唯一。 */
     val connection: ConnectionController by lazy { ConnectionController(this) }

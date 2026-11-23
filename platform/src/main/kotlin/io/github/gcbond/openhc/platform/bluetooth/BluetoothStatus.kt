@@ -14,9 +14,18 @@ object BluetoothStatus {
         ON,
     }
 
-    /** 本机的经典蓝牙适配器；没有蓝牙返回 null。 */
+    /**
+     * 本机的经典蓝牙适配器；没有蓝牙返回 null。
+     *
+     * `BluetoothManager` 是 API 18 才有；安卓 4.1 上退回 `BluetoothAdapter.getDefaultAdapter()`（API 5）。
+     */
+    @Suppress("DEPRECATION")
     fun adapter(context: Context): BluetoothAdapter? =
-        (context.applicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            (context.applicationContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        } else {
+            BluetoothAdapter.getDefaultAdapter()
+        }
 
     fun state(adapter: BluetoothAdapter?): State = when {
         adapter == null -> State.UNSUPPORTED

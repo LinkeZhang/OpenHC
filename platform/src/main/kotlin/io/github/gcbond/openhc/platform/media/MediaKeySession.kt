@@ -20,6 +20,7 @@ import java.io.Closeable
  * - 回调都在主线程上。[close] 后不再回调。
  * - 不申请音频焦点，也不出声；什么时候建、什么时候关由调用方决定（例如只在替手机拿着媒体焦点时）。
  */
+@android.annotation.TargetApi(android.os.Build.VERSION_CODES.LOLLIPOP)
 class MediaKeySession(context: Context, tag: String, private val listener: Listener) : Closeable {
 
     interface Listener {

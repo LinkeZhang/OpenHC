@@ -166,6 +166,11 @@ object MediaKeys {
         val open = session
         if (want && open == null) {
             val context = appContext ?: return
+            // MediaSession 是 API 21 才有；安卓 4.1～4.4 上不建会话（方向盘键只在投屏页前台时转给手机）。
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP) {
+                Log.i(TAG, "安卓 5.0 以前没有媒体会话，方向盘键只在投屏页前台时转给手机")
+                return
+            }
             session = try {
                 MediaKeySession(context, SESSION_TAG, SessionListener)
             } catch (e: RuntimeException) {

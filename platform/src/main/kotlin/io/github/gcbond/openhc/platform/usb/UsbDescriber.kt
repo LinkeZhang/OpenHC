@@ -11,7 +11,12 @@ object UsbDescriber {
             UsbInterfaceDescription(
                 index = i,
                 id = iface.id,
-                alternateSetting = iface.alternateSetting,
+                // getAlternateSetting 是 API 21 才有；低版本按 0 处理（只用于描述/日志）。
+                alternateSetting = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    iface.alternateSetting
+                } else {
+                    0
+                },
                 interfaceClass = iface.interfaceClass,
                 interfaceSubclass = iface.interfaceSubclass,
                 interfaceProtocol = iface.interfaceProtocol,

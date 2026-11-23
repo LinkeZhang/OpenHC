@@ -76,7 +76,13 @@ class AudioFocusController(context: Context, private val listener: Listener) : C
                 reportMediaFocus()
                 closed = true
             }
-            thread.quitSafely()
+            // quitSafely 是 API 18 才有；4.1 上用 quit()（同样会处理完已投递的消息再退出）。
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                thread.quitSafely()
+            } else {
+                @Suppress("DEPRECATION")
+                thread.quit()
+            }
         }
     }
 

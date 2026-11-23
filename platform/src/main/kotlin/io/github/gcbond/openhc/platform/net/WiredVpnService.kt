@@ -3,6 +3,7 @@ package io.github.gcbond.openhc.platform.net
 import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.Binder
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
@@ -53,9 +54,17 @@ class WiredVpnService : VpnService() {
             .setMtu(spec.mtu)
             .addAddress(spec.address, spec.prefixLength)
             .addRoute(spec.network, spec.prefixLength)
-            .addAllowedApplication(packageName)
-            .allowFamily(OsConstants.AF_INET6)
-            .setBlocking(false)
+        // addAllowedApplication / allowFamily / setBlocking 都是 API 21 才有。
+        // 安卓 4.1～4.4 上：
+        // - 不加 allowed 列表：整个设备走 VPN。有线场景里车机本来就只把这条路由指到手机，
+        //   而且 4.x 上系统一次只允许一个 VPN，影响可控；
+        // - 不显式允许 IPv6：低版本默认就把 IPv6 一起收进来；
+        // - 非阻塞靠描述符本身的 O_NONBLOCK（VpnService 建出的 TUN 在低版本上本来就是非阻塞的）。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            builder.addAllowedApplication(packageName)
+            builder.allowFamily(android.system.OsConstants.AF_INET6)
+            builder.setBlocking(false)
+        }
         spec.configureIntent?.let { builder.setConfigureIntent(it) }
         return builder.establish()
     }

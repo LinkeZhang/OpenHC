@@ -67,7 +67,7 @@ internal object DeviceInfo {
         val service = serviceField.get(adapter) ?: return null
         val getAddress = Class.forName("android.bluetooth.IBluetooth").getMethod("getAddress")
         (getAddress.invoke(service) as? String)?.takeIf { it.isNotBlank() }
-    } catch (e: ReflectiveOperationException) {
+    } catch (e: Exception) {
         null
     } catch (e: RuntimeException) {
         null
@@ -125,7 +125,7 @@ internal object DeviceInfo {
     private fun systemProperty(key: String): String? = try {
         val get = Class.forName("android.os.SystemProperties").getMethod("get", String::class.java)
         (get.invoke(null, key) as? String)?.takeIf { it.isNotBlank() }
-    } catch (e: ReflectiveOperationException) {
+    } catch (e: Exception) {
         null
     } catch (e: RuntimeException) {
         null
@@ -134,11 +134,8 @@ internal object DeviceInfo {
     /** 从 Settings.Global 和 Settings.Secure 里找一个键；两边都没有返回 null。 */
     @SuppressLint("HardwareIds")
     private fun settingsValue(context: Context, key: String): String? {
-        val global = try {
-            android.provider.Settings.Global.getString(context.contentResolver, key)
-        } catch (e: RuntimeException) {
-            null
-        }
+        // Settings.Global 是 API 17 才有；安卓 4.1 上 Compat 会退回 Settings.Secure。
+        val global = io.github.gcbond.openhc.compat.Compat.globalString(context, key)
         if (!global.isNullOrBlank()) return global
         return try {
             android.provider.Settings.Secure.getString(context.contentResolver, key)
@@ -154,7 +151,7 @@ internal object DeviceInfo {
             .getMethod("getDefaultAdapter")
             .invoke(null) ?: return null
         (adapter.javaClass.getMethod("getAddress").invoke(adapter) as? String)?.takeIf { it.isNotBlank() }
-    } catch (e: ReflectiveOperationException) {
+    } catch (e: Exception) {
         null
     } catch (e: RuntimeException) {
         null
@@ -162,16 +159,21 @@ internal object DeviceInfo {
 
     /** 默认屏幕（车机主屏）的实际像素、DPI 和按刷新率算出的帧率。 */
     fun screen(context: Context): ScreenSpec {
-        val display = (context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)?.getDisplay(Display.DEFAULT_DISPLAY)
+        // DisplayManager 是 API 17 才有；安卓 4.1 上退回 WindowManager.getDefaultDisplay。
+        val display = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.JELLY_BEAN_MR1) {
+            (context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)?.getDisplay(Display.DEFAULT_DISPLAY)
+        } else {
+            @Suppress("DEPRECATION")
+            (context.getSystemService(Context.WINDOW_SERVICE) as? android.view.WindowManager)?.defaultDisplay
+        }
         val metrics = DisplayMetrics()
         val size = Point()
         if (display != null) {
-            // getRealSize/getRealMetrics 在安卓 12 被标为过时（新接口要界面 Context），但仍然返回整块屏幕的实际像素，
-            // 应用 Context 上也能用。
+            // getRealSize/getRealMetrics 是 API 17 才有，Compat 里按版本选实现。
+            val (w, h) = io.github.gcbond.openhc.compat.Compat.realSize(display)
+            size.set(w, h)
             @Suppress("DEPRECATION")
-            display.getRealSize(size)
-            @Suppress("DEPRECATION")
-            display.getRealMetrics(metrics)
+            display.getMetrics(metrics)
         }
         if (size.x <= 0 || size.y <= 0) {
             val fallback = context.resources.displayMetrics

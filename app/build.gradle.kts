@@ -3,7 +3,6 @@ import java.util.Properties
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.compose)
 }
 
 val localProperties = Properties().apply {
@@ -47,8 +46,10 @@ android {
         // versionCode = 主版本 × 10000 + 次版本 × 100 + 补丁号。
         // 这个分支是「上游 0.2.0 + 鸿蒙 4.2 音频修复 + 低版本车机适配」的衍生版：
         // 加 50 跟上游 0.2.0（200）区分开，装到车机上时一眼能看出跑的是哪个包。
-        versionCode = 251
-        versionName = "harmony4.2-NEXT-0.2.0"
+        versionCode = 260
+        versionName = "harmony4.2-NEXT-0.2.0-android4"
+        // 方法数超过 64K，安卓 4.x 要用 MultiDex 分包（5.0 起系统自带）。
+        multiDexEnabled = true
     }
 
     sourceSets {
@@ -82,7 +83,6 @@ android {
     }
 
     buildFeatures {
-        compose = true
         buildConfig = true
     }
 
@@ -104,13 +104,11 @@ dependencies {
     // 无线连接页显示配对二维码（Apache-2.0）。
     implementation(libs.zxing.core)
 
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.ui.tooling.preview)
-    debugImplementation(libs.androidx.compose.ui.tooling)
-    implementation(libs.androidx.core.ktx)
+    // android4-support 分支：不用 Compose（最低 API 21），界面用传统 View。
+    // core-ktx 1.12.0 的 minSdk 是 14，能在安卓 4.1 上跑；activity 用系统 Activity + startActivityForResult。
+    implementation("androidx.core:core-ktx:1.12.0")
+    // 安卓 4.1～4.4 上支持 MultiDex 分包（72k 方法超过单 dex 上限）。5.0 起系统自带，这个库会自动跳过。
+    implementation("androidx.multidex:multidex:2.0.1")
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit)

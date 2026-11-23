@@ -41,6 +41,7 @@ import java.util.UUID
  *
  * 权限：安卓 12 起要「附近的设备」（BLUETOOTH_CONNECT、BLUETOOTH_ADVERTISE），更早是清单里的普通蓝牙权限；没有时报 onFailed。
  */
+@android.annotation.TargetApi(android.os.Build.VERSION_CODES.LOLLIPOP)
 class LePairingPeripheral(
     context: Context,
     private val adapter: BluetoothAdapter,
@@ -100,6 +101,10 @@ class LePairingPeripheral(
         synchronized(lock) {
             check(!started) { "open 只能调用一次" }
             started = true
+        }
+        // GATT 服务端（API 18）和 BLE 广播（API 21）在安卓 4.1～4.4 上都没有，直接报不支持。
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP) {
+            return fail(Stage.ADVERTISING, Reason.UNSUPPORTED, "安卓 5.0 以前没有 BLE 广播接口")
         }
         val manager = app.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             ?: return fail(Stage.GATT, Reason.UNSUPPORTED, "没有蓝牙服务")

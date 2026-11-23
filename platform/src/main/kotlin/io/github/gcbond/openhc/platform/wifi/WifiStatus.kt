@@ -29,8 +29,13 @@ object WifiStatus {
         } catch (e: RuntimeException) {
             false
         }
+        // is5GHzBandSupported 是 API 21 才有；安卓 4.1～4.4 上不知道就报 false（只影响界面提示）。
         val fiveG = try {
-            wifi?.is5GHzBandSupported == true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                wifi?.is5GHzBandSupported == true
+            } else {
+                false
+            }
         } catch (e: RuntimeException) {
             false
         }
@@ -49,7 +54,12 @@ object WifiStatus {
     @Suppress("DEPRECATION")
     fun stationFrequency(context: Context): Int = try {
         val info = wifiManager(context)?.connectionInfo
-        if (info == null || info.networkId == -1) 0 else info.frequency.coerceAtLeast(0)
+        // getFrequency 是 API 21 才有；安卓 4.1～4.4 上读不到，返回 0（只影响日志和界面提示）。
+        if (info == null || info.networkId == -1 || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            0
+        } else {
+            info.frequency.coerceAtLeast(0)
+        }
     } catch (e: RuntimeException) {
         0
     }

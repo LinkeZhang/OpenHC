@@ -58,7 +58,7 @@ class ProjectionView @JvmOverloads constructor(
         set(value) {
             if (field == value) return
             field = value
-            if (!isAttachedToWindow) return
+            if (!io.github.gcbond.openhc.compat.Compat.isAttached(this)) return
             if (value) hideSystemBars() else restoreSystemBars()
         }
 
@@ -92,7 +92,7 @@ class ProjectionView @JvmOverloads constructor(
             decoder?.let { d ->
                 SurfaceListener { s ->
                     // 有 Surface 时视图一定挂在窗口上，拿得到所在的屏幕。
-                    if (s != null) d.setDisplayTiming(DisplayRefreshRate.timingOf(display))
+                    if (s != null) d.setDisplayTiming(DisplayRefreshRate.timingOf(io.github.gcbond.openhc.compat.Compat.displayOf(this)))
                     d.setSurface(s)
                 }
             },

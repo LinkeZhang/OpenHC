@@ -144,7 +144,7 @@ class RfcommClient(
         return try {
             val method = BluetoothDevice::class.java.getMethod("createInsecureRfcommSocket", Int::class.javaPrimitiveType)
             (method.invoke(device, ch) as BluetoothSocket).also { note("按通道号 $ch 直连") }
-        } catch (e: ReflectiveOperationException) {
+        } catch (e: Exception) {
             note("按通道号直连的系统接口用不了（${describe(e)}），改按 SDP 查 $uuid")
             null
         } catch (e: SecurityException) {

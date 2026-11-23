@@ -33,7 +33,7 @@ object RfcommChannel {
     fun innerPort(outer: Any): Int? = try {
         val inner = field(outer.javaClass, "mSocket")?.get(outer)
         if (inner == null) null else field(inner.javaClass, "mPort")?.getInt(inner)
-    } catch (e: ReflectiveOperationException) {
+    } catch (e: Exception) {
         null
     } catch (e: RuntimeException) {
         // 被非公开接口限制拦下、字段类型不对等。

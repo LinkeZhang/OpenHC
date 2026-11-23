@@ -24,7 +24,7 @@ internal object DecoderCatalog {
     /** 解码器清单第一次查要几十毫秒，查一次缓存起来（运行中不会变）。 */
     private val decoders: List<Entry> by lazy {
         val infos = try {
-            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.toList()
+            io.github.gcbond.openhc.platform.compat.MediaCodecListCompat.infos()
         } catch (e: RuntimeException) {
             emptyList()
         }
@@ -50,7 +50,13 @@ internal object DecoderCatalog {
     fun candidates(width: Int, height: Int): List<Candidate> = decoders
         .map { entry ->
             val sizeSupported = try {
-                entry.capabilities.videoCapabilities?.isSizeSupported(width, height) ?: false
+                // videoCapabilities / isSizeSupported 是 API 21 才有；4.1 上查不了，按「支持」处理，
+                // 让系统自己去挑（挑不出来解码器会配置失败，那时会退到下一个候选）。
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    entry.capabilities.videoCapabilities?.isSizeSupported(width, height) ?: false
+                } else {
+                    true
+                }
             } catch (e: RuntimeException) {
                 false
             }

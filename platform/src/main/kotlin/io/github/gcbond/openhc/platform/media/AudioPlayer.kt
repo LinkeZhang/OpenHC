@@ -1,7 +1,6 @@
 package io.github.gcbond.openhc.platform.media
 
 import android.media.AudioFormat
-import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
@@ -152,7 +151,6 @@ class AudioPlayer(
     private val info = MediaCodec.BufferInfo()
     private var reportedDropped = 0L
     private var appliedVolume = 1f
-    private val timestamp = AudioTimestamp()
     private var latencyAt = 0L
 
     /** 送进解码器、解出来的帧数：差值就是还在解码器里的。 */
@@ -302,10 +300,10 @@ class AudioPlayer(
                 frameBytes = frameBytes,
                 minimumBytes = minimum,
                 requestedBytes = requested,
-                bufferFrames = created.bufferSizeInFrames,
-                capacityFrames = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) created.bufferCapacityInFrames else null,
+                bufferFrames = io.github.gcbond.openhc.platform.compat.PlatformCompat.bufferSizeInFrames(created),
+                capacityFrames = io.github.gcbond.openhc.platform.compat.PlatformCompat.bufferCapacityInFrames(created, frameBytes, requested),
                 lowLatencyRequested = built.lowLatencyRequested,
-                performanceMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) created.performanceMode else null,
+                performanceMode = io.github.gcbond.openhc.platform.compat.PlatformCompat.performanceMode(created),
                 attributesNote = built.route,
             ),
         )
@@ -323,18 +321,19 @@ class AudioPlayer(
         val t = track ?: return
         if (!started) return
         val head = t.playbackHeadPosition.toLong() and UINT32
-        val stamped = playing && t.getTimestamp(timestamp)
+        // AudioTimestamp / getTimestamp 是 API 19 才有；4.1 上拿不到，硬件那一段记为未知。
+        val stamp = if (playing) io.github.gcbond.openhc.platform.compat.PlatformCompat.timestamp(t) else null
         latency = AudioLatency.estimate(
             sampleRate = trackRate,
             queueFrames = queuedFramesAtTrackRate(),
             decoderFrames = decoderInFrames - decoderOutFrames,
             framesWritten = framesWritten,
             headPosition = head,
-            timestampFrame = if (stamped) timestamp.framePosition else null,
-            timestampNanos = if (stamped) timestamp.nanoTime else 0L,
+            timestampFrame = stamp?.first,
+            timestampNanos = stamp?.second ?: 0L,
             nowNanos = System.nanoTime(),
         )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) trackUnderruns = t.underrunCount
+        trackUnderruns = io.github.gcbond.openhc.platform.compat.PlatformCompat.underrunCount(t)
     }
 
     /** 队列里的帧按输入采样率计；解码输出的采样率和输入不同时换算到音轨的采样率。 */
@@ -359,7 +358,7 @@ class AudioPlayer(
         }
         var done = 0
         while (done < length && !closed) {
-            val n = t.write(data, offset + done, length - done, AudioTrack.WRITE_BLOCKING)
+            val n = io.github.gcbond.openhc.platform.compat.PlatformCompat.writeBlocking(t, data, offset + done, length - done)
             if (n < 0) {
                 fatal("AudioTrack.write 返回 $n")
                 return
@@ -376,7 +375,7 @@ class AudioPlayer(
         val volume = requestedVolume
         if (!force && volume == appliedVolume) return
         try {
-            t.setVolume(volume)
+            io.github.gcbond.openhc.platform.compat.PlatformCompat.setVolume(t, volume)
             appliedVolume = volume
         } catch (e: IllegalStateException) {
             // 音轨刚好在释放：下一块数据时再设。
@@ -414,7 +413,7 @@ class AudioPlayer(
         try {
             val index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
             if (index >= 0) {
-                val input: ByteBuffer = codec.getInputBuffer(index) ?: return
+                val input: ByteBuffer = io.github.gcbond.openhc.platform.compat.PlatformCompat.inputBuffer(codec, index) ?: return
                 input.clear()
                 input.put(unit, from, to - from)
                 codec.queueInputBuffer(index, 0, to - from, presentationUs, 0)
@@ -464,7 +463,7 @@ class AudioPlayer(
                 index >= 0 -> {
                     wait = 0L
                     if (info.size > 0) {
-                        val output = codec.getOutputBuffer(index)
+                        val output = io.github.gcbond.openhc.platform.compat.PlatformCompat.outputBuffer(codec, index)
                         if (output != null) {
                             if (pcm.size < info.size) pcm = ByteArray(info.size)
                             output.position(info.offset)

@@ -27,8 +27,28 @@ enum class AudioUsage(val label: String) {
  */
 const val CAR_NAVIGATION_CONTENT_TYPE = 6
 
-/** 播放器音轨用的属性，以及给日志看的说明（普通情况为空）。 */
-class TrackAttributes(val attributes: AudioAttributes, val note: String)
+// AudioAttributes 的用途/内容类型常量是编译期常量（内联），所以在这里直接写数值，安卓 4.1 上引用也不报错。
+// 值来自 android.media.AudioAttributes：USAGE_MEDIA=1、USAGE_ASSISTANCE_NAVIGATION_GUIDANCE=12、
+// USAGE_ASSISTANT=16、USAGE_ASSISTANCE_SONIFICATION=13、USAGE_VOICE_COMMUNICATION=2、USAGE_NOTIFICATION_RINGTONE=6；
+// CONTENT_TYPE_MUSIC=2、CONTENT_TYPE_SPEECH=1、CONTENT_TYPE_SONIFICATION=4。
+internal const val USAGE_MEDIA = 1
+internal const val USAGE_ASSISTANCE_NAVIGATION_GUIDANCE = 12
+internal const val USAGE_ASSISTANT = 16
+internal const val USAGE_ASSISTANCE_SONIFICATION = 13
+internal const val USAGE_VOICE_COMMUNICATION = 2
+internal const val USAGE_NOTIFICATION_RINGTONE = 6
+internal const val CONTENT_TYPE_MUSIC = 2
+internal const val CONTENT_TYPE_SPEECH = 1
+internal const val CONTENT_TYPE_SONIFICATION = 4
+
+/**
+ * 播放器音轨用的属性，以及给日志看的说明（普通情况为空）。
+ *
+ * 这里只放两个 int（用途、内容类型），不持有 `AudioAttributes` 对象：那个类是 API 21 才有，
+ * 安卓 4.1 上连字段类型都不能出现，否则加载本类就 NoClassDefFoundError。真正建 AudioAttributes
+ * 在 [audioAttributes]（只在 API 21+ 调用）。
+ */
+class TrackAttributes(val usage: Int, val contentType: Int, val note: String)
 
 /**
  * 播放器音轨用的属性。导航那一路先试车机扩展的导航属性（用途媒体 + 内容类型 [CAR_NAVIGATION_CONTENT_TYPE]），
@@ -39,7 +59,12 @@ class TrackAttributes(val attributes: AudioAttributes, val note: String)
 // 故意传标准以外的内容类型：车机系统扩展的值，标准系统会抛异常并退回。
 @SuppressLint("WrongConstant")
 fun AudioUsage.trackAttributes(): TrackAttributes {
-    if (this != AudioUsage.NAVIGATION) return TrackAttributes(attributes(), "")
+    if (this != AudioUsage.NAVIGATION) return plain()
+    // 车机扩展的导航内容类型：安卓 11 起 setContentType 会抛 IllegalArgumentException；8～10 不抛、悄悄改掉，
+    // 只有把建好的属性读回来才看得出。低版本（<21）根本没有 AudioAttributes，直接用标准换算。
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+        return TrackAttributes(USAGE_MEDIA, CAR_NAVIGATION_CONTENT_TYPE, "车机导航声道（安卓 4.x 按 streamType 建，用途换算成媒体）")
+    }
     return try {
         val car = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -51,16 +76,42 @@ fun AudioUsage.trackAttributes(): TrackAttributes {
         } else {
             "系统没认下车机扩展的导航内容类型（读回用途 ${car.usage}、内容类型 ${car.contentType}），多半跟媒体音量走"
         }
-        TrackAttributes(car, note)
+        TrackAttributes(car.usage, car.contentType, note)
     } catch (e: IllegalArgumentException) {
-        TrackAttributes(attributes(), "标准导航用途（系统不认车机扩展的导航内容类型）")
+        TrackAttributes(plain().usage, plain().contentType, "标准导航用途（系统不认车机扩展的导航内容类型）")
     }
 }
 
+/** 不带车机扩展的标准属性值（纯 int，任何版本都能算）。 */
+private fun AudioUsage.plain(): TrackAttributes = when (this) {
+    AudioUsage.MEDIA -> TrackAttributes(USAGE_MEDIA, CONTENT_TYPE_MUSIC, "")
+    AudioUsage.NAVIGATION -> TrackAttributes(USAGE_ASSISTANCE_NAVIGATION_GUIDANCE, CONTENT_TYPE_SPEECH, "")
+    AudioUsage.ASSISTANT -> TrackAttributes(
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) USAGE_ASSISTANT else USAGE_ASSISTANCE_SONIFICATION,
+        CONTENT_TYPE_SPEECH,
+        "",
+    )
+    AudioUsage.CALL -> TrackAttributes(USAGE_VOICE_COMMUNICATION, CONTENT_TYPE_SPEECH, "")
+    AudioUsage.RINGTONE -> TrackAttributes(USAGE_NOTIFICATION_RINGTONE, CONTENT_TYPE_SONIFICATION, "")
+}
+
 /**
- * 音轨用的 AudioAttributes。提示与语音在安卓 8.0 起用 `USAGE_ASSISTANT`；更低的版本没有它，用
- * `USAGE_ASSISTANCE_SONIFICATION`。
+ * 安卓 5.0 以前建音轨只能给 streamType，这里是 [AudioUsage] 到老 streamType 的换算。
+ *
+ * 车机按 streamType 选音量档：媒体/导航/提示走 STREAM_MUSIC（4.x 上导航没有独立音量档，这是系统限制），
+ * 通话走 STREAM_VOICE_CALL（回声消除要它），铃声走 STREAM_RING。
  */
+fun AudioUsage.legacyStreamType(): Int = when (this) {
+    AudioUsage.MEDIA, AudioUsage.NAVIGATION, AudioUsage.ASSISTANT -> android.media.AudioManager.STREAM_MUSIC
+    AudioUsage.CALL -> android.media.AudioManager.STREAM_VOICE_CALL
+    AudioUsage.RINGTONE -> android.media.AudioManager.STREAM_RING
+}
+
+/**
+ * 音轨用的 AudioAttributes。**只在 API 21+ 调用**（`AudioAttributes` 是 API 21 才有）。
+ * 提示与语音在安卓 8.0 起用 `USAGE_ASSISTANT`；更低的版本没有它，用 `USAGE_ASSISTANCE_SONIFICATION`。
+ */
+@android.annotation.TargetApi(Build.VERSION_CODES.LOLLIPOP)
 fun AudioUsage.attributes(): AudioAttributes {
     val builder = AudioAttributes.Builder()
     when (this) {

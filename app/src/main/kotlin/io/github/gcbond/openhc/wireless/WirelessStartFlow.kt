@@ -1,6 +1,7 @@
 package io.github.gcbond.openhc.wireless
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -8,8 +9,6 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
-import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.WirelessPreferences
 
@@ -21,15 +20,12 @@ import io.github.gcbond.openhc.settings.WirelessPreferences
  * 必须在 Activity 构造时创建（结果回调要在 onCreate 之前注册）。
  */
 internal class WirelessStartFlow(
-    private val activity: ComponentActivity,
+    private val activity: Activity,
     private val controller: () -> WirelessController,
 ) {
     private val settings by lazy { AppSettings(activity) }
     private val wirelessPrefs by lazy { WirelessPreferences(activity) }
 
-    private val launcher = activity.registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        onPermissionResult()
-    }
 
     /** 「开始无线连接」。 */
     fun start() {
@@ -65,15 +61,17 @@ internal class WirelessStartFlow(
         }
         Log.i(TAG, "申请权限：${request.joinToString()}")
         try {
-            launcher.launch(request.toTypedArray())
+            // requestPermissions 是 API 23 才有；Compat 在低版本上什么都不做（那时权限装即授予）。
+            io.github.gcbond.openhc.compat.Compat.requestPermissions(activity, request.toTypedArray(), REQUEST_CODE)
         } catch (e: ActivityNotFoundException) {
             controller().reportBlocked(WirelessNotice.StartFailed("系统没有权限申请页"))
         }
     }
 
-    private fun onPermissionResult() {
+    /** 由 [Activity.onRequestPermissionsResult] 转进来。 */
+    fun onPermissionResult() {
         val denied = WirelessPermissions.afterRequest(Build.VERSION.SDK_INT, ::granted) {
-            activity.shouldShowRequestPermissionRationale(it)
+            io.github.gcbond.openhc.compat.Compat.shouldShowRationale(activity, it)
         }
         if (denied == null) {
             controller().start()
@@ -135,7 +133,9 @@ internal class WirelessStartFlow(
 
     private fun granted(permission: String) = WirelessPermissionCheck.granted(activity, permission)
 
-    private companion object {
-        const val TAG = "OpenHC-Wireless"
+    companion object {
+        /** 申请权限用的请求码；Activity 的 onRequestPermissionsResult 里按它回调 [onPermissionResult]。 */
+        const val REQUEST_CODE = 3001
+        private const val TAG = "OpenHC-Wireless"
     }
 }

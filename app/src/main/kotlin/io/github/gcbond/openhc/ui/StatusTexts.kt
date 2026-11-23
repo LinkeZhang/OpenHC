@@ -1,7 +1,6 @@
 package io.github.gcbond.openhc.ui
 
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.res.stringResource
+import android.content.Context
 import io.github.gcbond.openhc.R
 import io.github.gcbond.openhc.connection.ConnectionUiState
 import io.github.gcbond.openhc.connection.EndCause
@@ -14,9 +13,11 @@ import io.github.gcbond.openhc.core.session.EndReason
 import io.github.gcbond.openhc.platform.usb.WiredEndReason
 
 // 连接状态 → 界面文字。
+//
+// android4-support 分支：原来是 @Composable + stringResource，现在改成普通函数，接 Context 取字符串。
+// 好处是这些映射可以脱离界面单独测试，也能在任何线程上调用。
 
-@Composable
-internal fun phaseTitle(phase: Phase): String = stringResource(
+internal fun phaseTitle(context: Context, phase: Phase): String = context.getString(
     when (phase) {
         Phase.IDLE -> R.string.phase_idle
         Phase.PREPARING -> R.string.phase_preparing
@@ -32,30 +33,33 @@ internal fun phaseTitle(phase: Phase): String = stringResource(
     },
 )
 
-@Composable
-internal fun phaseHint(state: ConnectionUiState): String {
-    state.step?.let { return stringResource(stepHint(it)) }
+internal fun phaseHint(context: Context, state: ConnectionUiState): String {
+    state.step?.let { return context.getString(stepHint(it)) }
     return when (state.phase) {
-        Phase.IDLE -> stringResource(R.string.hint_idle)
-        Phase.PREPARING -> stringResource(R.string.hint_preparing)
-        Phase.WAITING_FOR_PHONE -> stringResource(R.string.hint_waiting_for_phone)
-        Phase.USB_DEBUGGING_ON -> stringResource(R.string.hint_usb_debugging)
-        Phase.WAITING_USB_PERMISSION -> stringResource(R.string.hint_usb_permission_phone)
-        Phase.CONFIRM_ON_PHONE -> stringResource(R.string.hint_phone_switch)
-        Phase.CONNECTING -> stringResource(R.string.hint_connecting)
+        Phase.IDLE -> context.getString(R.string.hint_idle)
+        Phase.PREPARING -> context.getString(R.string.hint_preparing)
+        Phase.WAITING_FOR_PHONE -> context.getString(R.string.hint_waiting_for_phone)
+        Phase.USB_DEBUGGING_ON -> context.getString(R.string.hint_usb_debugging)
+        Phase.WAITING_USB_PERMISSION -> context.getString(R.string.hint_usb_permission_phone)
+        Phase.CONFIRM_ON_PHONE -> context.getString(R.string.hint_phone_switch)
+        Phase.CONNECTING -> context.getString(R.string.hint_connecting)
         Phase.PAIRING ->
-            stringResource(if (state.pinCode != null) R.string.hint_pairing else R.string.hint_pairing_wait)
+            context.getString(if (state.pinCode != null) R.string.hint_pairing else R.string.hint_pairing_wait)
         Phase.PROJECTING -> {
             val video = state.video
             when {
-                video == null -> stringResource(R.string.hint_negotiating)
-                !state.firstFrame -> stringResource(R.string.hint_projecting_waiting_frame, video.width, video.height, video.fps)
-                !video.touchInput -> stringResource(R.string.hint_projecting_no_touch, video.width, video.height, video.fps)
-                else -> stringResource(R.string.hint_projecting, video.width, video.height, video.fps)
+                video == null -> context.getString(R.string.hint_negotiating)
+                !state.firstFrame -> context.getString(
+                    R.string.hint_projecting_waiting_frame, video.width, video.height, video.fps,
+                )
+                !video.touchInput -> context.getString(
+                    R.string.hint_projecting_no_touch, video.width, video.height, video.fps,
+                )
+                else -> context.getString(R.string.hint_projecting, video.width, video.height, video.fps)
             }
         }
-        Phase.STOPPING -> stringResource(R.string.hint_stopping)
-        Phase.REPLUG_REQUIRED -> stringResource(R.string.hint_replug_unplug)
+        Phase.STOPPING -> context.getString(R.string.hint_stopping)
+        Phase.REPLUG_REQUIRED -> context.getString(R.string.hint_replug_unplug)
     }
 }
 
@@ -77,27 +81,25 @@ private fun stepHint(step: Step): Int = when (step) {
     Step.REPLUG_WAIT -> R.string.hint_replug_wait
 }
 
-@Composable
-internal fun noticeText(notice: Notice): String = when (notice) {
-    Notice.IdentityMissing -> stringResource(R.string.notice_identity_missing)
-    is Notice.IdentityInvalid -> stringResource(R.string.notice_identity_invalid, notice.reason)
-    Notice.VpnConsentRequired -> stringResource(R.string.notice_vpn_required)
-    is Notice.VpnUnavailable -> stringResource(R.string.notice_vpn_unavailable, notice.reason)
-    is Notice.TrustStoreCorrupt -> stringResource(R.string.notice_trust_corrupt, notice.reason)
-    is Notice.TrustStoreUnavailable -> stringResource(R.string.notice_trust_unavailable, notice.reason)
-    is Notice.StartFailed -> stringResource(R.string.notice_start_failed, notice.reason)
-    is Notice.Ended -> stringResource(R.string.notice_ended, endCauseText(notice.cause))
+internal fun noticeText(context: Context, notice: Notice): String = when (notice) {
+    Notice.IdentityMissing -> context.getString(R.string.notice_identity_missing)
+    is Notice.IdentityInvalid -> context.getString(R.string.notice_identity_invalid, notice.reason)
+    Notice.VpnConsentRequired -> context.getString(R.string.notice_vpn_required)
+    is Notice.VpnUnavailable -> context.getString(R.string.notice_vpn_unavailable, notice.reason)
+    is Notice.TrustStoreCorrupt -> context.getString(R.string.notice_trust_corrupt, notice.reason)
+    is Notice.TrustStoreUnavailable -> context.getString(R.string.notice_trust_unavailable, notice.reason)
+    is Notice.StartFailed -> context.getString(R.string.notice_start_failed, notice.reason)
+    is Notice.Ended -> context.getString(R.string.notice_ended, endCauseText(context, notice.cause))
 }
 
-@Composable
-private fun endCauseText(cause: EndCause): String = when (cause) {
-    EndCause.UserStop -> stringResource(R.string.end_user_stop)
+private fun endCauseText(context: Context, cause: EndCause): String = when (cause) {
+    EndCause.UserStop -> context.getString(R.string.end_user_stop)
     is EndCause.Wired -> {
-        val text = stringResource(wiredEndText(cause.reason))
-        cause.detail?.let { stringResource(R.string.end_with_detail, text, it) } ?: text
+        val text = context.getString(wiredEndText(cause.reason))
+        cause.detail?.let { context.getString(R.string.end_with_detail, text, it) } ?: text
     }
-    is EndCause.Session -> sessionEndText(cause.reason)
-    is EndCause.Failure -> stringResource(R.string.end_failure, cause.message)
+    is EndCause.Session -> sessionEndText(context, cause.reason)
+    is EndCause.Failure -> context.getString(R.string.end_failure, cause.message)
 }
 
 private fun wiredEndText(reason: WiredEndReason): Int = when (reason) {
@@ -121,24 +123,37 @@ private fun wiredEndText(reason: WiredEndReason): Int = when (reason) {
 }
 
 /** 常见原因给一句好懂的话；其余的用会话层自带的说明（已经是中文，不含密钥和设备标识）。 */
-@Composable
-private fun sessionEndText(reason: EndReason): String = when (reason) {
-    EndReason.LocalStop -> stringResource(R.string.end_user_stop)
-    EndReason.ControlHandshakeTimeout -> stringResource(R.string.end_session_handshake_timeout)
+private fun sessionEndText(context: Context, reason: EndReason): String = when (reason) {
+    EndReason.LocalStop -> context.getString(R.string.end_user_stop)
+    EndReason.ControlHandshakeTimeout -> context.getString(R.string.end_session_handshake_timeout)
     is EndReason.AuthFailed -> when (reason.failure) {
-        is AuthFailure.ConnectionClosed -> stringResource(R.string.end_session_auth_closed)
-        AuthFailure.NotTrusted -> stringResource(R.string.end_session_not_trusted)
-        else -> stringResource(R.string.end_session_auth_failed, reason.failure.toString())
+        is AuthFailure.ConnectionClosed -> context.getString(R.string.end_session_auth_closed)
+        AuthFailure.NotTrusted -> context.getString(R.string.end_session_not_trusted)
+        else -> context.getString(R.string.end_session_auth_failed, reason.failure.toString())
     }
-    is EndReason.KeepAliveTimeout -> stringResource(R.string.end_session_keepalive)
+    is EndReason.KeepAliveTimeout -> context.getString(R.string.end_session_keepalive)
     is EndReason.ProjectionEnded -> when (reason.reason) {
-        HiSightEndReason.LOCAL_SHUTDOWN -> stringResource(R.string.end_user_stop)
-        HiSightEndReason.PEER_TEARDOWN -> stringResource(R.string.end_projection_teardown)
-        HiSightEndReason.CONTROL_CLOSED -> stringResource(R.string.end_projection_control_closed)
-        HiSightEndReason.VIDEO_CLOSED -> stringResource(R.string.end_projection_video_closed)
-        HiSightEndReason.REMOTE_CONTROL_CLOSED -> stringResource(R.string.end_projection_remote_closed)
+        HiSightEndReason.LOCAL_SHUTDOWN -> context.getString(R.string.end_user_stop)
+        HiSightEndReason.PEER_TEARDOWN -> context.getString(R.string.end_projection_teardown)
+        HiSightEndReason.CONTROL_CLOSED -> context.getString(R.string.end_projection_control_closed)
+        HiSightEndReason.VIDEO_CLOSED -> context.getString(R.string.end_projection_video_closed)
+        HiSightEndReason.REMOTE_CONTROL_CLOSED -> context.getString(R.string.end_projection_remote_closed)
     }
     is EndReason.ProtocolError, is EndReason.PeerClosed, is EndReason.NetworkError,
     is EndReason.VideoSinkFailed, is EndReason.InternalError,
     -> reason.toString()
 }
+
+/**
+ * 身份参数的状态由首页顶上的提示卡片按当前结果显示，状态卡里不再重复。
+ * 首页用它过滤掉这两条提示，避免同一件事说两遍。
+ */
+internal fun io.github.gcbond.openhc.connection.ConnectionUiState.withoutIdentityNotice():
+    io.github.gcbond.openhc.connection.ConnectionUiState =
+    if (notice == io.github.gcbond.openhc.connection.Notice.IdentityMissing ||
+        notice is io.github.gcbond.openhc.connection.Notice.IdentityInvalid
+    ) {
+        copy(notice = null)
+    } else {
+        this
+    }

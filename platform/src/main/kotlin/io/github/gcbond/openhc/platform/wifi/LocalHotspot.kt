@@ -615,7 +615,12 @@ class LocalHotspotOwner private constructor(context: Context) {
     @Suppress("DEPRECATION")
     private fun stationFrequency(): Int = try {
         val info = wifi?.connectionInfo
-        if (info == null || info.networkId == -1) 0 else info.frequency.coerceAtLeast(0)
+        // getFrequency 是 API 21 才有；安卓 4.1～4.4 上读不到，返回 0（只影响日志）。
+        if (info == null || info.networkId == -1 || android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP) {
+            0
+        } else {
+            info.frequency.coerceAtLeast(0)
+        }
     } catch (e: RuntimeException) {
         0
     }

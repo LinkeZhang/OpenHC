@@ -58,7 +58,7 @@ class MicAacEncoder(
         if (closed) return
         val index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
         if (index >= 0) {
-            val buffer = codec.getInputBuffer(index)
+            val buffer = io.github.gcbond.openhc.platform.compat.PlatformCompat.inputBuffer(codec, index)
             if (buffer == null) {
                 dropped++
             } else {
@@ -81,7 +81,7 @@ class MicAacEncoder(
             if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return
             // 输出格式变化等通知：不带数据，接着取。
             if (index < 0) continue
-            val buffer = codec.getOutputBuffer(index)
+            val buffer = io.github.gcbond.openhc.platform.compat.PlatformCompat.outputBuffer(codec, index)
             val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
             if (buffer != null && !isConfig && info.size > 0 && info.size + AdtsWriter.HEADER_BYTES <= AdtsWriter.MAX_FRAME_BYTES) {
                 val frame = ByteArray(AdtsWriter.HEADER_BYTES + info.size)

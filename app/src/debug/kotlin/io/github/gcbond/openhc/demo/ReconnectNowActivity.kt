@@ -1,13 +1,13 @@
 package io.github.gcbond.openhc.demo
 
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothManager
+import android.app.Activity
+import android.bluetooth.BluetoothAdapter
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.TextView
-import androidx.activity.ComponentActivity
 import io.github.gcbond.openhc.OpenHcApp
 
 /**
@@ -21,7 +21,7 @@ import io.github.gcbond.openhc.OpenHcApp
  * ```
  * 注意：同一台手机 60 秒内只拨一次（防重复触发的冷却）。
  */
-class ReconnectNowActivity : ComponentActivity() {
+class ReconnectNowActivity : Activity() {
 
     private val main = Handler(Looper.getMainLooper())
     private lateinit var log: TextView
@@ -57,7 +57,8 @@ class ReconnectNowActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun pairedHuaweiPhone(): String? = try {
-        (getSystemService(BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter?.bondedDevices?.firstOrNull { d ->
+        // BluetoothManager 是 API 18 才有，这里用 API 5 就有的 BluetoothAdapter.getDefaultAdapter()。
+        BluetoothAdapter.getDefaultAdapter()?.bondedDevices?.firstOrNull { d ->
             val n = d.name ?: ""
             listOf("HUAWEI", "HONOR", "Mate", "nova", "Pura", "华为", "荣耀").any { n.contains(it, ignoreCase = true) }
         }?.address

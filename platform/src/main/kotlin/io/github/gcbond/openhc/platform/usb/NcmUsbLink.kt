@@ -69,9 +69,48 @@ internal class NcmUsbLink private constructor(
     }
 
     companion object {
+        /** USB 标准请求 SET_INTERFACE：bmRequestType 0x01（标准、接口、出）、bRequest 0x0B。 */
+        private const val SET_INTERFACE_REQUEST_TYPE = 0x01
+        private const val SET_INTERFACE_REQUEST = 0x0B
         private const val CONTROL_TIMEOUT_MS = 1000
         private const val NOTIFICATION_TIMEOUT_MS = 300
         private const val DEFAULT_ZLP_PACKET_SIZE = 512
+
+        /**
+         * 切换接口的备用设置。
+         *
+         * `UsbDeviceConnection.setInterface` 是 API 21 才有；安卓 4.1～4.4 上用 USB 规范里的标准请求
+         * `SET_INTERFACE`（bmRequestType=0x01 出、bRequest=0x0B）走 `controlTransfer`，效果一样。
+         */
+        private fun setInterfaceCompat(
+            connection: android.hardware.usb.UsbDeviceConnection,
+            iface: android.hardware.usb.UsbInterface,
+        ): Boolean {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                return connection.setInterface(iface)
+            }
+            return try {
+                val n = connection.controlTransfer(
+                    SET_INTERFACE_REQUEST_TYPE, SET_INTERFACE_REQUEST, alternateSettingOf(iface), iface.id,
+                    null, 0, CONTROL_TIMEOUT_MS,
+                )
+                n >= 0
+            } catch (e: RuntimeException) {
+                false
+            }
+        }
+
+        /**
+         * 接口的备用设置号。`UsbInterface.getAlternateSetting` 是 API 21 才有；
+         * 低版本按 0 处理（4.x 车机上 NCM 数据口就在备用 0）。
+         */
+        private fun alternateSettingOf(iface: android.hardware.usb.UsbInterface): Int =
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                iface.alternateSetting
+            } else {
+                0
+            }
+
 
         /**
          * 打开切成 USB 网卡的手机：强占控制口和数据口 → 读 NTB 参数 → 数据口切到备用 0（NCM 功能复位）→
@@ -100,7 +139,8 @@ internal class NcmUsbLink private constructor(
                     throw IOException("抢占 NCM 接口失败")
                 }
                 val parameters = readNtbParameters(connection, control.id, log)
-                if (dataIdle != null && !connection.setInterface(dataIdle)) log("数据口切到备用 0 失败，继续")
+                // setInterface 是 API 21 才有；安卓 4.1～4.4 上退到 SET_INTERFACE 控制传输（USB 规范的标准请求）。
+                if (dataIdle != null && !setInterfaceCompat(connection, dataIdle)) log("数据口切到备用 0 失败，继续")
                 val plan = CdcNcm.receivePlan(parameters?.ntbInMaxSize, sdkInt)
                 plan.setInputSize?.let { size ->
                     // 规范要求数据口在备用 0 时才能改 NTB 输入上限。
@@ -114,7 +154,9 @@ internal class NcmUsbLink private constructor(
                         else "压低手机 NTB 上限失败（返回 $n），超过 $size 字节的块会被截断丢弃",
                     )
                 }
-                if (!connection.setInterface(dataActive)) throw IOException("数据口切到备用 ${dataActive.alternateSetting} 失败")
+                if (!setInterfaceCompat(connection, dataActive)) {
+                    throw IOException("数据口切到备用 ${alternateSettingOf(dataActive)} 失败")
+                }
                 notification?.let {
                     // 手机切好后会在通知端点上报连接状态与速率；读掉一条，与实测通过的做法一致。读不到也不要紧。
                     connection.bulkTransfer(it, ByteArray(16), 16, NOTIFICATION_TIMEOUT_MS)

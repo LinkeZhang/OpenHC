@@ -1,6 +1,8 @@
 package io.github.gcbond.openhc
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -8,68 +10,49 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.KeyEvent
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Surface
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.core.content.ContextCompat
 import io.github.gcbond.openhc.audio.MicPermission
 import io.github.gcbond.openhc.connection.ConnectionController
 import io.github.gcbond.openhc.connection.DeviceInfo
 import io.github.gcbond.openhc.connection.Notice
 import io.github.gcbond.openhc.connection.Phase
+import io.github.gcbond.openhc.core.hisight.HiSightInput
 import io.github.gcbond.openhc.platform.net.VpnConsent
+import io.github.gcbond.openhc.projection.ProjectionView
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
 import io.github.gcbond.openhc.startup.BootStart
 import io.github.gcbond.openhc.startup.BootStartPolicy
 import io.github.gcbond.openhc.ui.HomeActions
-import io.github.gcbond.openhc.ui.HomeScreen
-import io.github.gcbond.openhc.ui.OpenHcTheme
-import io.github.gcbond.openhc.ui.Palette
-import io.github.gcbond.openhc.ui.ProjectionScreen
-import io.github.gcbond.openhc.ui.SettingsScreen
+import io.github.gcbond.openhc.ui.HomeView
+import io.github.gcbond.openhc.ui.SettingsView
 import io.github.gcbond.openhc.ui.WirelessActions
 import io.github.gcbond.openhc.wireless.WirelessController
 import io.github.gcbond.openhc.wireless.WirelessPhase
 import io.github.gcbond.openhc.wireless.WirelessStartFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /**
  * 唯一的界面：首页、设置、全屏投屏页。连接本身在 [ConnectionController] 和前台服务里，界面关掉不影响。
  *
- * 插线拉起：设置「插线时不再弹窗」打开后（见 UsbAutoConnect），清单里给华为、荣耀手机声明的 USB 设备过滤器才生效，
- * 插线时系统会问用不用本应用打开，勾了「默认」以后就直接拉起来（经 [onNewIntent] 或 [onCreate]）。
- * 会话中途手机重新枚举也会再拉一次，由调度按状态忽略。
+ * android4-support 分支：从 ComponentActivity + Compose 改成系统 [Activity] + 原生 View。
+ * 状态仍由 StateFlow 推过来，这里订阅后在主线程重画当前页面。
+ * 权限申请从 registerForActivityResult 改成 requestPermissions / startActivityForResult（兼容安卓 4.1）。
  *
- * 开机自动打开：设置打开后，开机广播接收器打开本界面（见 [BootStart]），这里当作点了「开始」，进入等插线；
- * 要做无线自动回连、插线又能自己把有线带起来时不进入，让无线先等（见 BootStartPolicy.waitForCable）。
- * 「开机静默连接」开着时开机不打开本界面，等待在后台开始；手机连上时用 SHOW_PROJECTION 把本界面带到前台，
- * 这时不开始任何连接，投屏页、连接码由下面按连接状态自己切过去。
- *
- * 开始之前要的授权按顺序拿：通知权限（安卓 13 起，只问一次，拒绝了也照常连接）→ 录音权限（开着车机麦克风时，
- * 只自动问一次，拒绝了照常连接、不声明麦克风）→ VPN 授权（有线连接必需）。
- *
- * 首页左栏是无线连接、右栏是有线连接（[HomeScreen]）；无线开始前的运行时权限由 [WirelessStartFlow] 申请。
- * 两种连接同时只能有一种：无线在进行时不开始有线（包括插线拉起）；只是在等已配对的手机回连、手机还没连上时，
- * 有线优先，无线让出。界面回到前台时看看要不要进入等回连（[WirelessController.onAppForeground]）。
+ * 插线拉起、开机自动打开、开机静默连接的逻辑与原版一致，见各方法上的说明。
  */
-class MainActivity : ComponentActivity() {
+class MainActivity : Activity() {
 
     private enum class StartKind { START, USB_ATTACHED, BOOT }
+
+    private enum class Screen { HOME, SETTINGS, PROJECTION }
 
     private lateinit var settings: AppSettings
     private var pendingStart: StartKind? = null
@@ -77,77 +60,261 @@ class MainActivity : ComponentActivity() {
     private val controller: ConnectionController get() = (application as OpenHcApp).connection
     private val wireless: WirelessController get() = (application as OpenHcApp).wireless
 
-    /** 无线连接开始前申请权限；结果回调要在 onCreate 之前注册，所以在构造时创建。 */
-    private val wirelessStart = WirelessStartFlow(this) { wireless }
+    private lateinit var wirelessStart: WirelessStartFlow
 
-    private val notificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { askNextPermission() }
+    private lateinit var root: FrameLayout
+    private var homeView: HomeView? = null
+    private var settingsView: SettingsView? = null
+    private var projectionView: ProjectionView? = null
 
-    private val micPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) {
-                Log.i(TAG, "用户没有给录音权限：这次不声明车机麦克风")
-                Toast.makeText(this, R.string.mic_permission_denied, Toast.LENGTH_LONG).show()
-            }
-            askNextPermission()
+    private var screen = Screen.HOME
+    private var projectionWireless = false
+    private var autoShownAttempt = 0
+    private var autoShownWireless = 0
+
+    private lateinit var identity: IdentityLoader.Result
+    private var scope: CoroutineScope? = null
+    private var job: Job? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        settings = AppSettings(this)
+        identity = IdentityLoader.load(this)
+        wirelessStart = WirelessStartFlow(this) { wireless }
+
+        root = FrameLayout(this).apply { setBackgroundColor(io.github.gcbond.openhc.ui.Palette.Background) }
+        setContentView(root)
+
+        if (savedInstanceState == null) handleLaunch(intent)
+        observe()
+    }
+
+    /**
+     * 订阅三份状态（有线、无线、各自的解码器与触摸重置计数）。
+     * 每次变化都重画当前页面：页面结构简单，整体重建比做增量更新可靠，也不会有漏更新。
+     */
+    private fun observe() {
+        val j = Job()
+        job = j
+        val s = CoroutineScope(Dispatchers.Main + j)
+        scope = s
+        s.launch { controller.state.collect { renderCurrent() } }
+        s.launch { wireless.state.collect { renderCurrent() } }
+        s.launch { controller.decoder.collect { renderCurrent() } }
+        s.launch { wireless.decoder.collect { renderCurrent() } }
+        s.launch { controller.touchResets.collect { renderCurrent() } }
+        s.launch { wireless.touchResets.collect { renderCurrent() } }
+        renderCurrent()
+    }
+
+    override fun onDestroy() {
+        job?.cancel()
+        projectionView?.attachDecoder(null)
+        super.onDestroy()
+    }
+
+    /**
+     * 决定现在显示哪一页。
+     *
+     * 自动切投屏：任何一边进入投屏就切到投屏页；用户按返回回首页后，同一次连接不再强拉回去（用 attempt 记）。
+     * 投屏结束回首页；要输连接码时也从设置页回首页。
+     */
+    private fun renderCurrent() {
+        val wired = controller.state.value
+        val w = wireless.state.value
+
+        if (w.phase == WirelessPhase.PROJECTING && autoShownWireless != w.attempt) {
+            autoShownWireless = w.attempt
+            projectionWireless = true
+            screen = Screen.PROJECTION
         }
+        if (wired.phase == Phase.PROJECTING && autoShownAttempt != wired.attempt) {
+            autoShownAttempt = wired.attempt
+            projectionWireless = false
+            screen = Screen.PROJECTION
+        }
+        if (screen == Screen.PROJECTION) {
+            val still = if (projectionWireless) w.phase == WirelessPhase.PROJECTING else wired.phase == Phase.PROJECTING
+            if (!still) screen = Screen.HOME
+        }
+        if (wired.phase == Phase.PAIRING && screen == Screen.SETTINGS) screen = Screen.HOME
 
-    private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val kind = pendingStart
-        pendingStart = null
-        if (kind == null) return@registerForActivityResult
-        if (result.resultCode == RESULT_OK && VpnConsent.isGranted(this)) {
-            dispatch(kind)
-        } else {
-            Log.i(TAG, "用户没有同意 VPN 授权")
-            controller.reportBlocked(Notice.VpnConsentRequired)
+        when (screen) {
+            Screen.HOME -> showHome(wired, w)
+            Screen.SETTINGS -> showSettings()
+            Screen.PROJECTION -> showProjection()
         }
     }
+
+    private fun showHome(
+        wired: io.github.gcbond.openhc.connection.ConnectionUiState,
+        w: io.github.gcbond.openhc.wireless.WirelessUiState,
+    ) {
+        detachProjection()
+        val view = homeView ?: HomeView(this).also { homeView = it }
+        view.render(
+            wired = wired,
+            wireless = w,
+            identity = identity,
+            actions = HomeActions(
+                onStart = { requestStart(StartKind.START) },
+                onStop = { controller.stop() },
+                onRetryNow = { controller.retryNow() },
+                onGrantVpn = { requestStart(StartKind.START) },
+                onResetTrustStore = { controller.resetTrustStoreAndStart() },
+            ),
+            wirelessActions = WirelessActions(
+                onStart = { wirelessStart.start() },
+                onStop = { wireless.stop() },
+                onShowProjection = {
+                    if (w.phase == WirelessPhase.PROJECTING) {
+                        projectionWireless = true
+                        screen = Screen.PROJECTION
+                        renderCurrent()
+                    }
+                },
+                onOpenSettings = { screen = Screen.SETTINGS; renderCurrent() },
+                onOpenAppSettings = { wirelessStart.openAppSettings() },
+                onEnableBluetooth = { wirelessStart.requestEnableBluetooth() },
+                onResetTrustStore = { wireless.resetTrustStoreAndStart() },
+            ),
+            onShowProjection = {
+                if (wired.phase == Phase.PROJECTING) {
+                    projectionWireless = false
+                    screen = Screen.PROJECTION
+                    renderCurrent()
+                }
+            },
+            onOpenSettings = { screen = Screen.SETTINGS; renderCurrent() },
+        )
+        setContent(view)
+    }
+
+    private fun showSettings() {
+        detachProjection()
+        val view = settingsView ?: SettingsView(this).also { settingsView = it }
+        view.render(
+            settings = settings,
+            systemBluetoothAddress = DeviceInfo.systemBluetoothAddress(this),
+            // 「自动读取」按钮：用户手动触发，把所有来源的候选值都列出来让车主挑。
+            onReadCandidates = { DeviceInfo.bluetoothAddressCandidates(this) },
+            onBack = {
+                wireless.onSettingsClosed()
+                screen = Screen.HOME
+                renderCurrent()
+            },
+        )
+        setContent(view)
+    }
+
+    private fun showProjection() {
+        val decoder = if (projectionWireless) wireless.decoder.value else controller.decoder.value
+        val state = if (projectionWireless) wireless.state.value.projection else controller.state.value
+        val resets = if (projectionWireless) wireless.touchResets.value else controller.touchResets.value
+
+        val view = projectionView ?: ProjectionView(this).also { projectionView = it }
+        if (view.parent != null) (view.parent as ViewGroup).removeView(view)
+        view.fullScreen = io.github.gcbond.openhc.connection.DisplayArea.activeFullScreen
+        view.immersive = true
+        view.setVideoSize(state.videoWidth, state.videoHeight)
+        view.onInput = { input: HiSightInput ->
+            if (projectionWireless) wireless.sendInput(input) else controller.sendInput(input)
+        }
+        view.attachDecoder(decoder)
+        // touchResets 变了就重置一次触摸状态（发送端报告触摸对不上时）。
+        if (view.tag != resets) {
+            view.tag = resets
+            view.resetTouches()
+        }
+
+        val frame = FrameLayout(this).apply { setBackgroundColor(android.graphics.Color.BLACK) }
+        frame.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        val message = when {
+            !state.firstFrame -> getString(R.string.projection_waiting_frame)
+            state.decoderProblem != null -> getString(R.string.projection_decoder_problem, state.decoderProblem)
+            else -> ""
+        }
+        if (message.isNotEmpty()) {
+            frame.addView(
+                TextView(this).apply {
+                    text = message
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 15f
+                    setBackgroundColor(0xAA000000.toInt())
+                    setPadding(dp(8), dp(6), dp(8), dp(6))
+                },
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    leftMargin = dp(12)
+                    topMargin = dp(12)
+                },
+            )
+        }
+        setContent(frame)
+    }
+
+    /** 换页时把投屏视图从窗口上摘下来（Surface 还给解码器前要先断开）。 */
+    private fun detachProjection() {
+        projectionView?.let { view ->
+            if (view.parent != null) (view.parent as ViewGroup).removeView(view)
+            view.attachDecoder(null)
+        }
+    }
+
+    private fun setContent(view: android.view.View) {
+        if (root.childCount == 1 && root.getChildAt(0) === view) return
+        root.removeAllViews()
+        root.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onResume() {
         super.onResume()
         // 记下底部导航栏的实际高度（不管此刻显不显示），「全屏显示」关时按它让出画面、算声明尺寸。
-        window.decorView.post {
-            val insets = androidx.core.view.ViewCompat.getRootWindowInsets(window.decorView) ?: return@post
-            val bar = insets.getInsetsIgnoringVisibility(androidx.core.view.WindowInsetsCompat.Type.navigationBars()).bottom
+        root.post {
+            val bar = navigationBarHeight()
             if (bar > 0) io.github.gcbond.openhc.connection.DisplayArea.measuredNavigationBarHeight = bar
         }
+        wireless.onAppForeground()
+    }
+
+    private fun navigationBarHeight(): Int {
+        val id = resources.getIdentifier("navigation_bar_height", "dimen", "android")
+        return if (id > 0) resources.getDimensionPixelSize(id) else 0
     }
 
     /**
      * 界面没处理的方向盘、媒体键交给 [io.github.gcbond.openhc.input.MediaKeys]：有能发键的连接时转给手机并吃掉，
      * 系统就不再把它派给别的媒体应用；没有连接时照常交给系统。
      */
-    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean =
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
         io.github.gcbond.openhc.input.MediaKeys.onWindowKey(event) || super.onKeyDown(keyCode, event)
 
-    override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean =
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
         io.github.gcbond.openhc.input.MediaKeys.onWindowKey(event) || super.onKeyUp(keyCode, event)
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        settings = AppSettings(this)
-        val identity = IdentityLoader.load(this)
-        val actions = HomeActions(
-            onStart = { requestStart(StartKind.START) },
-            onStop = { controller.stop() },
-            onRetryNow = { controller.retryNow() },
-            onGrantVpn = { requestStart(StartKind.START) },
-            onResetTrustStore = { controller.resetTrustStoreAndStart() },
-        )
-        setContent {
-            OpenHcTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = Palette.Background) {
-                    AppRoot(controller, settings, identity, actions, wireless, wirelessStart)
-                }
+    /**
+     * 返回键：设置页、投屏页都回首页；投屏时连接保持，可以再回到投屏画面。
+     *
+     * android4-support 分支：安卓 4.x 没有 OnBackPressedDispatcher / 预测性返回，只能走这个旧回调。
+     * lint 的 GestureBackNavigation 是针对新系统的提醒，这里按设计忽略。
+     */
+    @Deprecated("安卓 4.x 上没有 OnBackPressedDispatcher")
+    @SuppressLint("GestureBackNavigation")
+    override fun onBackPressed() {
+        when (screen) {
+            Screen.SETTINGS -> {
+                wireless.onSettingsClosed()
+                screen = Screen.HOME
+                renderCurrent()
             }
+            Screen.PROJECTION -> {
+                screen = Screen.HOME
+                renderCurrent()
+            }
+            Screen.HOME -> @Suppress("DEPRECATION") super.onBackPressed()
         }
-        if (savedInstanceState == null) handleLaunch(intent)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        wireless.onAppForeground()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -185,7 +352,9 @@ class MainActivity : ComponentActivity() {
         if (wireless.blocksWired) {
             // 两种连接同时只能有一种：插线拉起时只记一笔，用户点开始时给出原因。
             Log.i(TAG, "无线连接正在进行，不开始有线连接（$kind）")
-            if (kind == StartKind.START) controller.reportBlocked(Notice.StartFailed(getString(R.string.wireless_notice_wireless_active)))
+            if (kind == StartKind.START) {
+                controller.reportBlocked(Notice.StartFailed(getString(R.string.wireless_notice_wireless_active)))
+            }
             return
         }
         pendingStart = kind
@@ -196,19 +365,33 @@ class MainActivity : ComponentActivity() {
     private fun askNextPermission() {
         if (pendingStart == null) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !settings.notificationPermissionAsked &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             settings.notificationPermissionAsked = true
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFICATION)
             return
         }
         val audio = AudioPreferences(this)
         if (audio.micEnabled && !audio.micPermissionAsked && !MicPermission.granted(this)) {
             audio.micPermissionAsked = true
-            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC)
             return
         }
         continueStart()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        when (requestCode) {
+            REQ_NOTIFICATION -> askNextPermission()
+            REQ_MIC -> {
+                if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+                    Log.i(TAG, "用户没有给录音权限：这次不声明车机麦克风")
+                    Toast.makeText(this, R.string.mic_permission_denied, Toast.LENGTH_LONG).show()
+                }
+                askNextPermission()
+            }
+        }
     }
 
     private fun continueStart() {
@@ -219,7 +402,8 @@ class MainActivity : ComponentActivity() {
                 dispatch(kind)
             }
             is VpnConsent.Status.NeedsUserConsent -> try {
-                vpnConsent.launch(consent.intent)
+                @Suppress("DEPRECATION")
+                startActivityForResult(consent.intent, REQ_VPN)
             } catch (e: ActivityNotFoundException) {
                 pendingStart = null
                 controller.reportBlocked(Notice.VpnUnavailable(getString(R.string.vpn_dialog_missing)))
@@ -231,8 +415,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @Deprecated("安卓 4.x 上没有 Activity Result API")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_VPN) return
+        val kind = pendingStart
+        pendingStart = null
+        if (kind == null) return
+        if (resultCode == RESULT_OK && VpnConsent.isGranted(this)) {
+            dispatch(kind)
+        } else {
+            Log.i(TAG, "用户没有同意 VPN 授权")
+            controller.reportBlocked(Notice.VpnConsentRequired)
+        }
+    }
+
     private fun dispatch(kind: StartKind) {
-        // 无线在被动等已配对的手机回连（已不再自动进入）的话先让出。
+        // 无线在被动等已配对的手机回连的话先让出。
         wireless.yieldToWired()
         when (kind) {
             StartKind.START, StartKind.BOOT -> controller.start()
@@ -242,108 +441,8 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val TAG = "OpenHC-App"
-    }
-}
-
-private enum class Screen { HOME, SETTINGS, PROJECTION }
-
-@Composable
-private fun AppRoot(
-    controller: ConnectionController,
-    settings: AppSettings,
-    identity: IdentityLoader.Result,
-    actions: HomeActions,
-    wireless: WirelessController,
-    wirelessStart: WirelessStartFlow,
-) {
-    val state by controller.state.collectAsState()
-    val decoder by controller.decoder.collectAsState()
-    val touchResets by controller.touchResets.collectAsState()
-    val wState by wireless.state.collectAsState()
-    val wDecoder by wireless.decoder.collectAsState()
-    val wTouchResets by wireless.touchResets.collectAsState()
-    val wirelessProjecting = wState.phase == WirelessPhase.PROJECTING
-    var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
-    // 投屏页显示的是哪种连接的画面。
-    var projectionWireless by rememberSaveable { mutableStateOf(false) }
-    // 已经自动切到投屏页的那次连接：用户按返回回到首页后，同一次连接不再强拉回去。
-    var autoShownAttempt by remember { mutableIntStateOf(0) }
-    var autoShownWireless by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(state.phase, state.attempt, wState.phase, wState.attempt) {
-        when {
-            wirelessProjecting && autoShownWireless != wState.attempt -> {
-                autoShownWireless = wState.attempt
-                projectionWireless = true
-                screen = Screen.PROJECTION
-            }
-            state.phase == Phase.PROJECTING && autoShownAttempt != state.attempt -> {
-                autoShownAttempt = state.attempt
-                projectionWireless = false
-                screen = Screen.PROJECTION
-            }
-            // 投屏结束回首页（首页两栏各自写着结束原因）。
-            screen == Screen.PROJECTION && projectionWireless && !wirelessProjecting -> screen = Screen.HOME
-            screen == Screen.PROJECTION && !projectionWireless && state.phase != Phase.PROJECTING -> screen = Screen.HOME
-            // 要输连接码时回首页，免得用户停在设置页看不到。
-            state.phase == Phase.PAIRING && screen == Screen.SETTINGS -> screen = Screen.HOME
-        }
-    }
-    // 设置可能改了：还没连上手机的等待按新设置重开。
-    val closeSettings = {
-        wireless.onSettingsClosed()
-        screen = Screen.HOME
-    }
-    // 返回键：设置页、投屏页都回首页；投屏时连接保持，可以再回到投屏画面。
-    BackHandler(enabled = screen != Screen.HOME) {
-        if (screen == Screen.SETTINGS) closeSettings() else screen = Screen.HOME
-    }
-
-    when (screen) {
-        Screen.HOME -> HomeScreen(
-            wired = state,
-            wireless = wState,
-            identity = identity,
-            actions = actions,
-            wirelessActions = WirelessActions(
-                onStart = wirelessStart::start,
-                onStop = wireless::stop,
-                onShowProjection = {
-                    if (wirelessProjecting) {
-                        projectionWireless = true
-                        screen = Screen.PROJECTION
-                    }
-                },
-                onOpenSettings = { screen = Screen.SETTINGS },
-                onOpenAppSettings = wirelessStart::openAppSettings,
-                onEnableBluetooth = wirelessStart::requestEnableBluetooth,
-                onResetTrustStore = wireless::resetTrustStoreAndStart,
-            ),
-            onShowProjection = {
-                if (state.phase == Phase.PROJECTING) {
-                    projectionWireless = false
-                    screen = Screen.PROJECTION
-                }
-            },
-            onOpenSettings = { screen = Screen.SETTINGS },
-        )
-        Screen.SETTINGS -> {
-            val context = LocalContext.current
-            val screenSpec = remember { io.github.gcbond.openhc.connection.DisplayArea.screenFor(context, settings.fullScreen) }
-            val systemBluetooth = remember { DeviceInfo.systemBluetoothAddress(context) }
-            SettingsScreen(
-                settings,
-                screenSpec,
-                systemBluetooth,
-                // 「自动读取」按钮：用户手动触发，把所有来源的候选值都列出来让车主挑（首次打开时车机可能还没初始化好）。
-                onReadCandidates = { DeviceInfo.bluetoothAddressCandidates(context) },
-                onBack = closeSettings,
-            )
-        }
-        Screen.PROJECTION -> if (projectionWireless) {
-            ProjectionScreen(wState.projection, wDecoder, wTouchResets, onInput = wireless::sendInput)
-        } else {
-            ProjectionScreen(state, decoder, touchResets, onInput = controller::sendInput)
-        }
+        const val REQ_NOTIFICATION = 1001
+        const val REQ_MIC = 1002
+        const val REQ_VPN = 1003
     }
 }
