@@ -108,6 +108,30 @@ internal class AudioOutput(
         )
     }
 
+    /**
+     * 播视频时的音乐参数：**薄缓冲**，保证音画同步。
+     *
+     * 实测安卓 9 车机：视频从解码到上屏只要 13ms，几乎实时；而纯音乐模式的音频
+     * 总延迟约 1000ms（队列 795 + 音轨 140 + 硬件 62），差了一秒，听起来就是音画不同步。
+     *
+     * 分路之后音乐那一路只有 140 包/秒（不再和导航混在一起翻倍），350ms 缓冲足够吸收
+     * 剩下的抖动；实测视频场景下音乐那路丢包 0ms，所以这个厚度是安全的。
+     */
+    private val videoTuning: AudioTuning = prefs.playbackTuning().let {
+        AudioTuning(
+            startMillis = 250,
+            targetMillis = 350,
+            maxMillis = 800,
+            trackMillis = 150,
+            startWindowMillis = 0,
+            trimHoldMillis = 600_000,
+            extraDelayMillis = 0,
+            lowLatency = false,
+            mediaStream = it.mediaStream,
+            navigationStream = it.navigationStream,
+        )
+    }
+
     /** 抓包到第一次有音频回调时才建（没声明扬声器、手机没要声音的连接不用开线程和文件）。 */
     private var capture: AudioCapture? = null
 
@@ -120,6 +144,30 @@ internal class AudioOutput(
     private var focus: AudioFocusController? = null
     private var closed = false
     private var muted = 0L
+
+    /**
+     * 视频是不是在播（决定音乐用厚缓冲还是薄缓冲）。
+     *
+     * 视频链路只要 13ms，音频厚缓冲却要 1000ms，差一秒就是音画不同步。
+     * 播视频时切薄缓冲（350ms），纯听音乐时用厚缓冲（1500ms）保证不断音。
+     */
+    @Volatile
+    private var videoActive = false
+
+    /**
+     * 视频开始/停止出帧时由视频侧调用。
+     *
+     * 只影响**之后新建**的音乐播放器：已经在播的播放器换缓冲要重建音轨，会断一下声音，
+     * 比不同步更难受。实际使用中投屏时视频流一直在，第一个音乐播放器建出来就是对的。
+     */
+    fun onVideoActive(active: Boolean) {
+        if (videoActive == active) return
+        videoActive = active
+        DiagnosticLog.log(
+            TAG,
+            "[$attemptId] 视频${if (active) "开始出帧，音乐改用薄缓冲（保证音画同步）" else "停止出帧，音乐恢复厚缓冲"}",
+        )
+    }
 
     /**
      * 一路声音的键。
@@ -372,6 +420,8 @@ internal class AudioOutput(
         // 音乐那一路是连续的，用长缓冲盖住手机每 3 秒换会话的停发。
         val chosen = when {
             packet.route == AudioRoute.NAVIGATION -> navigationTuning
+            // 播视频时用薄缓冲，否则音频比画面晚一秒，音画不同步。
+            packet.continuous && videoActive -> videoTuning
             packet.continuous -> continuousTuning
             else -> tuning
         }
