@@ -16,10 +16,12 @@ class PrivateAudioFramesTest {
 
     /**
      * 真机日志里的前三包头部（只记了前 32 字节，18 字节帧头齐全）。
-     * 帧头结构：`##`(2) + 标识(6) + 类型(2) + 00 00(2) + 序号(4) + 长度(2) = 18。
+     * 帧头结构：`#`(1) + module(4) + 魔数 FEDCBA03(4) + 段号(1) + 计数(4) + 分片号(2) + 长度(2) = 18。
      *
-     * 第 1 包类型是 0x0301（流信息，数据区是 `03 03 01 4a 3b 87…`，不是 PCM）；
-     * 第 2、3 包类型是 0x0302（音频帧）。
+     * 第 1 包段号是 01（组头，数据区是 `03 03 01 4a 3b 87…`，不是 PCM）；
+     * 第 2、3 包段号是 02（音频帧）。
+     *
+     * 这里的 module 是 `0x23886D03`，首字节恰好 `0x23`，所以看起来像 `23 23`（曾经的误判来源）。
      */
     private val infoHead = "2323886d03fedcba03010000000000000578"
     private val audioHeads = listOf(
@@ -27,13 +29,31 @@ class PrivateAudioFramesTest {
         "2323886d03fedcba03020000000000020578",
     )
 
+    /**
+     * 2026-11-23 的真机头部：module 换成 `0x2854EED7`，首字节 `0x28`。
+     *
+     * 这一版上线后「投屏正常但没声音」，根因就是老判据查偏移 0/1 的 `##`：
+     * 偏移 1 其实是 module 首字节，会话号变了判据就失效，整批音频被当未知二进制丢掉。
+     * 段号 01/02/03 与长度 1400/1210 和老样本完全一致，从偏移 5 起逐字节相同。
+     */
+    private val newModuleInfoHead = "232854eed7fedcba030100000000000005780303b4db3f2f000000010000000800002012000000000000000000000000"
+    private val newModuleAudioHeads = listOf(
+        "232854eed7fedcba03020000000000010578000000000000000000000000000000000000000000000000000000000000",
+        "232854eed7fedcba03020000000000020578000000000000000000000000000000000000000000000000000000000000",
+    )
+
+    /** 从真机日志里原样抄下来的 1210 字节段头（段号 03，长度 0x04BA）。 */
+    private val newModuleTailHead =
+        "2328550675fedcba030300000095000504ba4e0371fb7204adfc2c06c7fd6d07a3fe8a0786ffb606030110069d030e07"
+
     /** 16 位双声道一帧 4 字节。 */
     private val frameBytes = 4
 
-    /** 按真机头拼一包：头 18 字节 + [dataLength] 字节载荷。 */
+    /** 按真机头拼一包：头 18 字节 + [dataLength] 字节载荷。样本可以给多于 18 字节，只取前 18 字节当帧头。 */
     private fun frame(head: String, dataLength: Int = 1400, fill: Byte = 0): ByteArray {
-        val header = head.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        assertEquals("样本头部应该是 18 字节", PrivateAudioFrames.HEADER_BYTES, header.size)
+        val all = head.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        assertTrue("样本头部至少要有 18 字节，实际 ${all.size}", all.size >= PrivateAudioFrames.HEADER_BYTES)
+        val header = all.copyOf(PrivateAudioFrames.HEADER_BYTES)
         val out = ByteArray(header.size + dataLength) { fill }
         System.arraycopy(header, 0, out, 0, header.size)
         return out
@@ -45,6 +65,68 @@ class PrivateAudioFramesTest {
         assertTrue("应该认出真机帧", PrivateAudioFrames.isPrivateFrame(payload, 0, payload.size))
         val info = frame(infoHead)
         assertTrue("流信息帧也是这种帧头", PrivateAudioFrames.isPrivateFrame(info, 0, info.size))
+    }
+
+    /**
+     * 回归：2026-11-23 的真机帧，module 首字节是 `0x28` 而不是 `0x23`，也必须认出来。
+     *
+     * 这一天上线后「投屏正常、一点声音都没有」：老判据查偏移 0/1 的 `##`，
+     * 把偏移 1 的 module 首字节误当成第二个 `#`。会话号一变（`0x23886D03` → `0x2854EED7`）
+     * 判据就失效，控制连接上所有音频包都被当「认不出的二进制」丢掉。
+     */
+    @Test
+    fun recognisesFramesWhoseModuleDoesNotStartWithHash() {
+        for (head in newModuleAudioHeads + listOf(newModuleInfoHead, newModuleTailHead)) {
+            val payload = frame(head)
+            assertTrue(
+                "module 首字节不是 0x23 也要认出来：${head.take(20)}",
+                PrivateAudioFrames.isPrivateFrame(payload, 0, payload.size),
+            )
+        }
+        // 老样本同样要认（不能修一个坏一个）。
+        for (head in audioHeads + listOf(infoHead)) {
+            val payload = frame(head)
+            assertTrue("老样本也要认：${head.take(20)}", PrivateAudioFrames.isPrivateFrame(payload, 0, payload.size))
+        }
+    }
+
+    /** 新样本的三段都要能放出声，且长度与老样本一致（组头剥 24、其余整段）。 */
+    @Test
+    fun playsTheNewModuleFrames() {
+        val parser = PrivateAudioFrames()
+        // 组头段的数据区以 03 03 开头（真机日志里是 03 03 b4 db 3f 2f …）。
+        val infoPayload = frame(newModuleInfoHead).also {
+            it[PrivateAudioFrames.HEADER_BYTES] = 0x03
+            it[PrivateAudioFrames.HEADER_BYTES + 1] = 0x03
+        }
+        val info = parser.parse(infoPayload, 0, infoPayload.size, frameBytes)
+        assertNotNull("组头段也要放", info)
+        assertEquals("组头剥掉 24 字节", 1400 - PrivateAudioFrames.GROUP_PREFIX_BYTES, info!!.length)
+        assertEquals(1L, parser.stripped)
+
+        val audio = parser.parse(frame(newModuleAudioHeads[0]), 0, 1418, frameBytes)
+        assertNotNull("音频段要放", audio)
+        assertEquals(1400, audio!!.length)
+
+        // 段号 03 声明 1210 字节（1210 % 4 = 2，尾巴留给下一包）。
+        val tailPayload = frame(newModuleTailHead, dataLength = 1210)
+        val tail = parser.parse(tailPayload, 0, tailPayload.size, frameBytes)
+        assertNotNull("1210 字节段也要放", tail)
+        assertEquals("整帧 1208 字节，尾巴 2 字节留给下一包", 1208, tail!!.length)
+        assertEquals(1L, parser.odd)
+        assertEquals(3L, parser.frames)
+        assertEquals("直方图里三种段号都要有", 3, parser.typeHistogram().split(" ").size)
+    }
+
+    /** 首字节不是 `#` 的二进制块不能被误认成音频。 */
+    @Test
+    fun rejectsBinaryThatOnlyLooksLikeAudio() {
+        // 魔数对但首字节不是 0x23。
+        val wrongFirst = frame(newModuleAudioHeads[0]).also { it[0] = 0x24 }
+        assertFalse("首字节不对要拒", PrivateAudioFrames.isPrivateFrame(wrongFirst, 0, wrongFirst.size))
+        // 首字节对但魔数不对。
+        val wrongMagic = frame(newModuleAudioHeads[0]).also { it[5] = 0x00 }
+        assertFalse("魔数不对要拒", PrivateAudioFrames.isPrivateFrame(wrongMagic, 0, wrongMagic.size))
     }
 
     @Test

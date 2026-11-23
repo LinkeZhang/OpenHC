@@ -8,22 +8,28 @@ import io.github.gcbond.openhc.core.common.toHex
  * 实测（v16/v17 日志，1418 字节一包，约 189KB/s，正好是 48kHz 双声道 16 位 PCM 的码率）：
  *
  * ```
- * 偏移  0: 23 23                   "##" 魔数
- * 偏移  2: 88 6d 03 fe dc ba       6 字节会话/流标识（同一条连接内不变）
- * 偏移  8: 03 02                  类型（BE16）
- * 偏移 10: 00 00
- * 偏移 12: 00 00 00 01             序号（BE32，逐包加一）
- * 偏移 16: 05 78                   数据长度（BE16，0x0578 = 1400）
+ * 偏移  0: 23                      '#' 帧首字节
+ * 偏移  1: 88 6d 03 fe             module（BE32，等于音频数据会话号，每次连接都变）
+ * 偏移  5: fe dc ba 03             魔数（BE32，0xFEDCBA03，固定不变）
+ * 偏移  9: 03                     段号（1/2/3，等价于老布局里的类型号）
+ * 偏移 10: 00 00 00 01             计数（BE32，逐包递增）
+ * 偏移 14: 00 05                  分片号（BE16）
+ * 偏移 16: 05 78                  数据长度（BE16，0x0578 = 1400）
  * 偏移 18: 裸 PCM（明文，静音时全 0）
  * ```
  *
- * **类型字段不是常量**，实测三种交替出现（稳定 1:4:1）：
- * - `0x0301`：**组头**。数据区前 24 字节是元数据，后面才是 PCM。
- * - `0x0302`：音频帧（数据区就是裸 PCM，静音时全 0）。
- * - `0x0303`：音频帧（数据区 1210 字节，尾巴 2 字节是填充，裁掉）。
+ * 上面这个布局是 2026-11-23 用 300 个真机帧头核对出来的。注意 `module` 是 4 字节、
+ * 占偏移 1～4，所以魔数 `0xFEDCBA03` 从偏移 **5** 开始。旧代码误以为偏移 0/1 是 `##`
+ * 双字节魔数，其实偏移 1 是 module 的首字节——会话号首字节恰好是 `0x23` 时看着像 `##`，
+ * 纯属巧合。详见 [isPrivateFrame]。
+ *
+ * **段号不是常量**，实测三种交替出现（稳定 1:4:1）：
+ * - `0x01`：**组头**。数据区前 24 字节是元数据，后面才是 PCM。
+ * - `0x02`：音频帧（数据区就是裸 PCM，静音时全 0）。
+ * - `0x03`：音频帧（数据区 1210 字节，尾巴 2 字节是填充，裁掉）。
  *
  * 三种都装着声音。带宽核对（v20 日志，4.249 秒、各 100/400/100 包）：
- * 三种全放 188.7 KiB/s ≈ 48kHz 双声道 16 位的 187.5 KiB/s，只放 0x0302 只有 128.7 KiB/s。
+ * 三种全放 188.7 KiB/s ≈ 48kHz 双声道 16 位的 187.5 KiB/s，只放 0x02 只有 128.7 KiB/s。
  *
  * `0x0301` 的 24 字节组头（v21 日志，两个样本）：
  *
@@ -254,10 +260,24 @@ internal class PrivateAudioFrames {
     }
 
     companion object {
+        /** 帧首字节，固定是 `'#'`（0x23）。 */
         const val MARKER = 0x23
 
-        /** `##` + 6 字节标识 + 类型 4 + 序号 4 + 长度 2。 */
+        /**
+         * 帧头里真正的魔数，固定在偏移 5，4 字节大端 `0xFEDCBA03`。
+         *
+         * 这才是唯一稳定的锚点：2026-11-23 的 300 个真机帧头样本里 100% 命中。
+         * 见 [isPrivateFrame] 的说明——以前拿偏移 0/1 的 `##` 当魔数是错的。
+         */
+        const val MAGIC = 0xFEDCBA03L
+
+        /**
+         * 帧头长度：`'#'(1) + module(4) + 魔数(4) + 段号(1) + 计数(4) + 分片号(2) + 长度(2) = 18`。
+         *
+         * 详细布局见类注释。
+         */
         const val HEADER_BYTES = 18
+        private const val MAGIC_AT = 5
         private const val TYPE_AT = 8
         private const val SEQUENCE_AT = 12
         private const val LENGTH_AT = 16
@@ -292,15 +312,33 @@ internal class PrivateAudioFrames {
         /**
          * 是不是这种私有帧。判得严一点：控制连接上正常的 DMSDP 文本消息不会长这样，
          * 长度字段也要落在合理范围，免得把别的二进制块误当成声音。
+         *
+         * **判据是偏移 5 的 `0xFEDCBA03`，不是偏移 0/1 的 `##`。**
+         *
+         * 以前这里查的是「前两个字节都是 0x23」，那是把偏移 1 的 **module 字段首字节**
+         * 误当成了第二个 `#`。module 就是手机那边的音频数据会话号，每建一次连接都变：
+         *
+         * - 2026-11-22 的会话号是 `0x23886D03`，首字节正好 `0x23` → 看起来像 `23 23`，蒙对了，有声。
+         * - 2026-11-23 的会话号是 `0x2854EED7`，首字节 `0x28` → `##` 判据失效，
+         *   控制连接上**所有**音频包都被当成「认不出的二进制」丢掉，投屏正常但一点声音没有。
+         *
+         * 300 个真机帧头样本里 `FEDCBA03` 100% 命中，才是真正稳定的锚点。
          */
         fun isPrivateFrame(payload: ByteArray, offset: Int, length: Int): Boolean {
             if (length < HEADER_BYTES) return false
-            if (payload[offset].toInt() != MARKER || payload[offset + 1].toInt() != MARKER) return false
+            if (payload[offset].toInt() and 0xFF != MARKER) return false
+            if (readU32Be(payload, offset + MAGIC_AT) != MAGIC) return false
             return declaredLength(payload, offset) in 1..MAX_DATA
         }
 
         private fun declaredLength(payload: ByteArray, offset: Int): Int =
             ((payload[offset + LENGTH_AT].toInt() and 0xFF) shl 8) or (payload[offset + LENGTH_AT + 1].toInt() and 0xFF)
+
+        private fun readU32Be(data: ByteArray, offset: Int): Long =
+            ((data[offset].toLong() and 0xFF) shl 24) or
+                ((data[offset + 1].toLong() and 0xFF) shl 16) or
+                ((data[offset + 2].toLong() and 0xFF) shl 8) or
+                (data[offset + 3].toLong() and 0xFF)
 
         private fun readU16Be(data: ByteArray, offset: Int): Int =
             ((data[offset].toInt() and 0xFF) shl 8) or (data[offset + 1].toInt() and 0xFF)
