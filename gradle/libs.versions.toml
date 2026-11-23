@@ -23,6 +23,10 @@ androidApi23Signature = "6.0_r3"
 
 [libraries]
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+# Dispatchers.Main 的实现（Handler 调度器）。只引 core 的话 Dispatchers.Main 是 missing 状态，
+# 一调 launch(Dispatchers.Main) 就抛 IllegalStateException 闪退。
+# 主线靠 Compose 的传递依赖带进来，本分支去掉了 Compose，必须显式声明。
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
 bouncycastle-prov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }

@@ -302,8 +302,20 @@ class VideoDecoder @JvmOverloads constructor(
 
     /** 安卓 4.1 同步轮询复用的 BufferInfo（避免每帧分配）。 */
     private val legacyInfo = MediaCodec.BufferInfo()
-    private val renderListener = MediaCodec.OnFrameRenderedListener { c, _, _ ->
-        if (c === codec && !outputOnPlaceholder) stats.onRendered()
+    /**
+     * 上屏回调。`MediaCodec.OnFrameRenderedListener` 是 **API 23** 才有的接口，
+     * 安卓 5.1（API 22）及以下必须用懒加载：写成普通字段的话，类一加载就要解析这个类型，
+     * 直接抛 `NoClassDefFoundError: VideoDecoder$$ExternalSyntheticLambda…` 把整条投屏连接搞挂
+     * （2026-11-23 安卓 5.1 真机实测）。
+     */
+    private val renderListener: MediaCodec.OnFrameRenderedListener? by lazy {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            MediaCodec.OnFrameRenderedListener { c, _, _ ->
+                if (c === codec && !outputOnPlaceholder) stats.onRendered()
+            }
+        } else {
+            null
+        }
     }
     private val holdTimeout = Runnable { onReplayHoldTimeout() }
     private val vsyncCallback = Choreographer.FrameCallback { frameTimeNanos -> onVsync(frameTimeNanos) }
@@ -895,7 +907,8 @@ class VideoDecoder @JvmOverloads constructor(
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 try {
-                    c.setOnFrameRenderedListener(renderListener, handler)
+                    // renderListener 是懒加载的，API 23 以下为 null（接口本身是 API 23 才有）。
+                    renderListener?.let { c.setOnFrameRenderedListener(it, handler) }
                 } catch (e: RuntimeException) {
                     // 上屏回调只用于统计，注册不上就不统计上屏帧数，不影响解码。
                     Log.w(TAG, "解码器 ${io.github.gcbond.openhc.platform.compat.PlatformCompat.codecName(c)} 不支持上屏回调：${e.message}")
