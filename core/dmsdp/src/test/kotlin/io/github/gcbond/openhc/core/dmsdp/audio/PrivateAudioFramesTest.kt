@@ -234,14 +234,60 @@ class PrivateAudioFramesTest {
         assertEquals(1L, parser.frames)
     }
 
-    /** 真机 0x0301 数据区开头那 24 字节组头。`0x2012 = 8210 = 1400×5 + 1210`。 */
+    /** 真机 0x0301 数据区开头那 24 字节组头。`0x2012 = 8210 = 1400×5 + 1210`。+10 是 8 = 音乐。 */
     private val groupHeader = "03030932697a000000010000000800002012000000000000"
 
+    /** 导航那一路的组头：只有 +10 不同（`00001000` = 4096 = 导航）。 */
+    private val navGroupHeader = "03030932697a000000010000100000002012000000000000"
+
     /** 把 24 字节组头写进包的数据区开头。 */
-    private fun withGroupHeader(payload: ByteArray): ByteArray {
-        val header = groupHeader.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        System.arraycopy(header, 0, payload, PrivateAudioFrames.HEADER_BYTES, header.size)
+    private fun withGroupHeader(payload: ByteArray, header: String = groupHeader): ByteArray {
+        val bytes = header.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        System.arraycopy(bytes, 0, payload, PrivateAudioFrames.HEADER_BYTES, bytes.size)
         return payload
+    }
+
+    /**
+     * 两路交织：组头 +10 是路由标记（8=音乐 / 4096=导航），解析出的 Frame.route 要跟着变。
+     *
+     * 安卓 9 车机实测包速率 270/秒（单路 140/秒的两倍）、时钟 1.00 倍，就是两路交织。
+     * 不分路的话两路灌进同一个播放器，按 1 秒/秒消费，必然堆满丢包。
+     */
+    @Test
+    fun splitsMediaAndNavigationStreamsByGroupMarker() {
+        val parser = PrivateAudioFrames()
+        val media = withGroupHeader(frame(infoHead))
+        val nav = withGroupHeader(frame(infoHead), navGroupHeader)
+        assertEquals(AudioRoute.MEDIA, parser.parse(media, 0, media.size, frameBytes)?.route)
+        assertEquals(AudioRoute.NAVIGATION, parser.parse(nav, 0, nav.size, frameBytes)?.route)
+        val histogram = parser.routeHistogram()
+        assertTrue("要统计出音乐那一路：$histogram", "音乐 1 组" in histogram)
+        assertTrue("要统计出导航那一路：$histogram", "导航 1 组" in histogram)
+    }
+
+    /**
+     * 两路各自的跨包尾巴不能串：音乐那组末尾的半采样必须拼到**音乐**的下一包，
+     * 不能拼到中间插进来的导航包前面（否则两路声音都碎）。
+     */
+    @Test
+    fun keepsCarrySeparatePerRoute() {
+        val parser = PrivateAudioFrames()
+        // 0x0302 是纯 PCM（没有组头），给 2 字节就凑不齐一帧，会留在该路的 carry 里。
+        val mediaOdd = frame(audioHeads[0], dataLength = 2)
+        assertNull("音乐那路只有 2 字节，凑不齐一帧", parser.parse(mediaOdd, 0, mediaOdd.size, frameBytes))
+        // 切到导航那一路（组头 +10 = 4096），这一包本身是完整的。
+        val nav = withGroupHeader(frame(infoHead, dataLength = 24 + 400), navGroupHeader)
+        assertNotNull(parser.parse(nav, 0, nav.size, frameBytes))
+        // 导航再来 2 字节：如果两路共用一份 carry，这里会拼成 4 字节直接放出来。
+        val navOdd = frame(audioHeads[0], dataLength = 2)
+        assertNull("导航那路也只有 2 字节，不能和音乐那份拼在一起", parser.parse(navOdd, 0, navOdd.size, frameBytes))
+        // 切回音乐，再来 2 字节：这时才和音乐自己的那 2 字节拼成一整帧。
+        val mediaBack = withGroupHeader(frame(infoHead, dataLength = 24 + 400))
+        assertNotNull(parser.parse(mediaBack, 0, mediaBack.size, frameBytes))
+        val joined = parser.parse(mediaOdd, 0, mediaOdd.size, frameBytes)
+        assertNotNull("音乐的两段 2 字节要拼成一帧", joined)
+        assertEquals("拼出来的正好一帧", 4, joined!!.length)
+        assertEquals(AudioRoute.MEDIA, joined.route)
     }
 
     /**

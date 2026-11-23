@@ -51,30 +51,73 @@ internal class AudioOutput(
     private val tuning: AudioTuning = prefs.playbackTuning()
 
     /**
-     * 鸿蒙 4.2 控制连接私有帧（连续流）用的播放参数：比默认多攒一些。
+     * 鸿蒙 4.2 控制连接私有帧（连续流）用的播放参数：**纯听音乐**时的厚缓冲。
      *
      * 实测这台手机每 3 秒拆一次数据会话、几十毫秒后再请求新的（见 [SpeakerSession.feedPrivateFrame]），
-     * 换号那一瞬间声音会停发约 50～70ms。默认参数只有 80ms 起播门槛、40ms 音轨缓冲，
-     * 稳态队列又常年在 20～48ms，盖不住这个空档：每 3 秒「放空 → 暂停 → 重新攒 85ms → 再出声」，
-     * 听起来就是规律性的一下卡顿。
+     * 换号那一瞬间声音会停发约 50～70ms。控制连接上音频和视频、文本挤在一条 TCP 里，
+     * 到达速率在 111～1157 包/秒之间剧烈抖动，低谷持续 1 秒以上。缓冲要够厚才能把这些低谷抹平。
      *
-     * 这里把起播门槛提到 200ms、音轨缓冲提到 120ms，留足余量盖过那 70ms 的停发，
-     * 代价是声音整体晚约 120ms（投屏场景听不出来）。
+     * **但厚缓冲的代价是声音晚约 1 秒。** 纯听音乐时听不出来，播视频时就音画不同步了
+     * （实测视频链路只要 13ms，音频 1000ms）。所以播视频时切到 [videoTuning]。
      */
     private val continuousTuning: AudioTuning = prefs.playbackTuning().let {
         AudioTuning(
             // 起播门槛给足：第一批数据是突发来的，攒一点点就急着出声，
             // 后面紧跟的低谷立刻把它放空，开头会抖好几秒。
             startMillis = 1_000,
-            // 削峰目标就是长期维持的缓冲量。控制连接上音频和视频、文本挤在一条 TCP 里，
-            // 实测到达速率在 111～1157 包/秒之间剧烈抖动，低谷持续 1 秒以上。
-            // 缓冲要够厚才能把这些低谷抹平，代价是声音晚约 1 秒（投屏场景听不出）。
+            // 削峰目标就是长期维持的缓冲量，够厚才能抹平 TCP 低谷。
             targetMillis = 1_500,
             maxMillis = 3_000,
             trackMillis = 300,
             // 不要「起播窗口内压回目标」：它会把刚到的突发削掉，紧接着的低谷就没人补，直接放空。
             startWindowMillis = 0,
             // 也不要长期削峰：削掉的数据补不回来，只会让后续更空。
+            trimHoldMillis = 600_000,
+            extraDelayMillis = it.extraDelayMillis,
+            lowLatency = false,
+            mediaStream = it.mediaStream,
+            navigationStream = it.navigationStream,
+        )
+    }
+
+    /**
+     * 播视频时的音乐参数：**薄缓冲**，保证音画同步。
+     *
+     * 实测安卓 9 车机：视频从解码到上屏只要 13ms，几乎实时；而纯音乐模式的音频
+     * 总延迟约 1000ms（队列 795 + 音轨 140 + 硬件 62），差了一秒，听起来就是音画不同步。
+     *
+     * 分路之后音乐那一路只有 140 包/秒（不再和导航混在一起翻倍），300ms 缓冲足够吸收
+     * 剩下的抖动；实测 v258 视频场景下音乐那路丢包 0ms，所以这个厚度是安全的。
+     */
+    private val videoTuning: AudioTuning = prefs.playbackTuning().let {
+        AudioTuning(
+            startMillis = 250,
+            targetMillis = 350,
+            maxMillis = 800,
+            trackMillis = 150,
+            startWindowMillis = 0,
+            trimHoldMillis = 600_000,
+            extraDelayMillis = it.extraDelayMillis,
+            lowLatency = false,
+            mediaStream = it.mediaStream,
+            navigationStream = it.navigationStream,
+        )
+    }
+
+    /**
+     * 导航播报那一路的播放参数：短缓冲。
+     *
+     * 导航是一句一句的短音频，攒太多会让每句开头缺字。它和音乐一样走那条拥挤的控制连接，
+     * 到达抖动同样剧烈（低谷持续 1 秒以上），所以缓冲不能只给几十毫秒，否则每句导航都要断；
+     * 给 800ms 仍比音乐短，听感上不至于拖。
+     */
+    private val navigationTuning: AudioTuning = prefs.playbackTuning().let {
+        AudioTuning(
+            startMillis = 500,
+            targetMillis = 800,
+            maxMillis = 1_500,
+            trackMillis = 150,
+            startWindowMillis = 0,
             trimHoldMillis = 600_000,
             extraDelayMillis = it.extraDelayMillis,
             lowLatency = false,
@@ -95,6 +138,33 @@ internal class AudioOutput(
     private var focus: AudioFocusController? = null
     private var closed = false
     private var muted = 0L
+
+    /** 导航当前在出声（用来决定音乐要不要压低）。 */
+    private var navigationSounding = false
+
+    /**
+     * 视频是不是在播（决定音乐用厚缓冲还是薄缓冲）。
+     *
+     * 视频链路只要 13ms，音频厚缓冲却要 1000ms，差一秒就是音画不同步。
+     * 播视频时切薄缓冲（350ms），纯听音乐时用厚缓冲（1500ms）保证不断音。
+     */
+    @Volatile
+    private var videoActive = false
+
+    /**
+     * 视频开始/停止出帧时由视频侧调用。
+     *
+     * 只影响**之后新建**的音乐播放器：已经在播的播放器换缓冲要重建音轨，会断一下声音，
+     * 比不同步更难受。实际使用中投屏时视频流一直在，第一个音乐播放器建出来就是对的。
+     */
+    fun onVideoActive(active: Boolean) {
+        if (videoActive == active) return
+        videoActive = active
+        DiagnosticLog.log(
+            TAG,
+            "[$attemptId] 视频${if (active) "开始出帧，音乐改用薄缓冲（保证音画同步）" else "停止出帧，音乐恢复厚缓冲"}",
+        )
+    }
 
     /**
      * 一路声音的键。
@@ -118,6 +188,14 @@ internal class AudioOutput(
                 is AudioPlayer.Event.Starved -> sound(false)
                 is AudioPlayer.Event.Failed -> if (event.fatal) sound(false)
                 else -> Unit
+            }
+            // 导航出声时把音乐压低，突出播报；导航放空（播报间隙）就恢复。
+            if (key.route == AudioRoute.NAVIGATION) {
+                when (event) {
+                    is AudioPlayer.Event.Started, is AudioPlayer.Event.Resumed -> duckForNavigation(true)
+                    is AudioPlayer.Event.Starved -> duckForNavigation(false)
+                    else -> Unit
+                }
             }
         }
 
@@ -243,6 +321,29 @@ internal class AudioOutput(
         focus ?: if (closed) null else AudioFocusController(app, FocusListener()).also { focus = it }
     }
 
+    /**
+     * 导航在出声：把音乐那一路压低，突出播报。导航放空（播报间隙）就恢复。
+     *
+     * 产品要求是「音乐压低、突出导航」，而不是把音乐静音——压低到 [NAVIGATION_DUCK_VOLUME]
+     * 既听清播报，又不断掉音乐的连续性。
+     */
+    private fun duckForNavigation(on: Boolean) {
+        synchronized(lock) {
+            if (closed) return
+            if (navigationSounding == on) return
+            navigationSounding = on
+            val mediaVolume = volumes[AudioUsage.MEDIA] ?: 1f
+            val target = if (on) mediaVolume * NAVIGATION_DUCK_VOLUME else mediaVolume
+            for (stream in streams.values) {
+                if (stream.usage == AudioUsage.MEDIA) stream.player.setVolume(target)
+            }
+            DiagnosticLog.log(
+                TAG,
+                "[$attemptId] 导航${if (on) "出声，音乐压到 ${(NAVIGATION_DUCK_VOLUME * 100).toInt()}%" else "播完，音乐恢复"}",
+            )
+        }
+    }
+
     private inner class FocusListener : AudioFocusController.Listener {
         override fun onVolume(usage: AudioUsage, volume: Float) {
             synchronized(lock) {
@@ -334,7 +435,15 @@ internal class AudioOutput(
         val stream = Stream(key, usage, packet.bus)
         // 连续流（鸿蒙 4.2 控制连接私有帧）用攒得更多的参数：手机每 3 秒换号会停发几十毫秒，
         // 默认的 80ms 起播 / 40ms 音轨盖不住，会每 3 秒放空卡一下。见 [continuousTuning]。
-        val chosen = if (packet.continuous) continuousTuning else tuning
+        //
+        // 导航那一路要短缓冲：它是一句一句的短音频，攒太多会让每句开头缺字。
+        val chosen = when {
+            !packet.continuous -> tuning
+            packet.route == AudioRoute.NAVIGATION -> navigationTuning
+            // 播视频时用薄缓冲，否则音频比画面晚一秒，音画不同步。
+            videoActive -> videoTuning
+            else -> continuousTuning
+        }
         stream.player = AudioPlayer(format, stream, chosen, usage)
         volumes[usage]?.let { stream.player.setVolume(it) }
         streams[key] = stream
@@ -400,6 +509,9 @@ internal class AudioOutput(
          * 不会和手机的 `DataSessionID` 撞：那个是十进制数字，这个是带前缀的字符串。
          */
         const val CONTINUOUS_SESSION = "continuous-control-audio"
+
+        /** 导航出声时音乐压到这个比例（不是静音：既听清播报，又不断掉音乐）。 */
+        const val NAVIGATION_DUCK_VOLUME = 0.3f
 
         /** 每一路每这么多包记一行统计（媒体 AAC 约 10 秒）。 */
         const val STATS_EVERY = 500L

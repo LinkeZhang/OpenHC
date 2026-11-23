@@ -452,6 +452,9 @@ class ConnectionController(context: Context) {
             current.sink.target = it
             mutableDecoder.value = it
         }
+        // 有视频流了：让音频改用薄缓冲。视频解码到上屏只要 13ms，音频厚缓冲却要 1000ms，
+        // 差一秒就是音画不同步（实测安卓 9 车机播视频时很明显）。
+        current.audio.onVideoActive(true)
         decoder.prepare(video.width, video.height, video.fps)
     }
 

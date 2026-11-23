@@ -53,8 +53,19 @@ import io.github.gcbond.openhc.core.common.toHex
  */
 internal class PrivateAudioFrames {
 
-    /** 解析出的一包：载荷是 [data] 的 `[offset, offset + length)`。 */
-    class Frame(val sequence: Int, val data: ByteArray, val offset: Int, val length: Int)
+    /**
+     * 解析出的一包：载荷是 [data] 的 `[offset, offset + length)`。
+     *
+     * [route] 是这一包属于哪一路：导航播报时手机会把「音乐」和「导航」两条独立的
+     * PCM 流交织在同一条控制连接上发（见 [ROUTE_NAVIGATION_MARKER]），必须分开放。
+     */
+    class Frame(
+        val sequence: Int,
+        val data: ByteArray,
+        val offset: Int,
+        val length: Int,
+        val route: AudioRoute,
+    )
 
     private var seen = 0L
     private var malformed = 0L
@@ -105,6 +116,37 @@ internal class PrivateAudioFrames {
 
     /** 剥掉组头元数据（[GROUP_PREFIX_BYTES] 字节）的帧数。 */
     val stripped: Long get() = prefixStripped
+
+    // ---- 组头时间戳：判断手机那边的音频时钟是不是比实时快 ----
+    //
+    // 实测安卓 9 车机（v255）：到达 164 包/秒，正常 140 包/秒，快了 17%，
+    // 队列 5 秒就顶到上限，然后每秒丢 165ms 音频。
+    // 两种可能：① 手机音频时钟真的跑快；② 同一段音频发了多遍。
+    // 组头时间戳直接给出答案：时间戳按真实速度走而包速率翻倍 → 重复发；
+    // 时间戳也按 1.17 倍速度走 → 手机时钟偏快。
+    private var groupStamps = 0L
+    private var lastGroupStamp = -1L
+    private val stampClock = ArrayList<Pair<Long, Long>>(32)
+
+    /** 音乐 / 导航各多少个组头（组头 +10 路由标记判定）。 */
+    private var mediaGroups = 0L
+    private var navigationGroups = 0L
+
+    /** 路由分布：`分路：音乐 N 组、导航 M 组`。两路交织时两个数都不为 0。 */
+    fun routeHistogram(): String = "分路：音乐 $mediaGroups 组、导航 $navigationGroups 组"
+
+    /** 音频时钟倍速：`(时间戳增量 / 90000) / (墙钟增量 / 1000)`。正常 1.00。 */
+    fun clockRate(): String {
+        if (stampClock.size < 2) return "音频时钟 样本不足（组头 ${groupStamps}）"
+        val a = stampClock.first()
+        val b = stampClock.last()
+        val stampMs = (b.first - a.first) / 90.0
+        val wallMs = (b.second - a.second).toDouble()
+        if (wallMs <= 0) return "音频时钟 样本不足"
+        return "音频时钟 %.2f 倍（最近 %d 组：时间戳走 %.0fms / 实际 %.0fms，组头共 %d）".format(
+            stampMs / wallMs, stampClock.size, stampMs, wallMs, groupStamps,
+        )
+    }
 
     /** 上一次见到的类型号，给上层出诊断用。 */
     val type: Int get() = lastType
@@ -163,6 +205,25 @@ internal class PrivateAudioFrames {
         // 听起来就是「有规律的咔、咔」，v21 真机日志证实）。
         val prefix = groupPrefixBytes(type, payload, offset + HEADER_BYTES, usableDeclared, frameBytes)
         if (prefix > 0) prefixStripped++
+        // 组头时间戳采样（必须在剥组头成功之后取：prefix == 0 时 dataAt 是裸 PCM）。
+        if (prefix > 0) {
+            val stamp = readU32Be(payload, offset + HEADER_BYTES + 2)
+            if (stamp != lastGroupStamp) {
+                lastGroupStamp = stamp
+                groupStamps++
+                stampClock.add(stamp to System.nanoTime() / 1_000_000)
+                if (stampClock.size > 32) stampClock.removeAt(0)
+            }
+            // 组头 +10 是路由标记（8=音乐 / 4096=导航），唯一可靠的区分字段。
+            // 安卓 9 车机实测包速率 270/秒，正好是单路（140/秒）的两倍，而时钟 1.00 倍——
+            // 这就是两路交织：手机把音乐和导航当成两条独立流塞进同一条连接。
+            // 不分路的话两路都灌进同一个播放器，按 1 秒/秒消费，必然堆满丢包。
+            val marker = readU32Be(payload, offset + HEADER_BYTES + 10)
+            currentRoute = if (marker == ROUTE_NAVIGATION_MARKER) AudioRoute.NAVIGATION else AudioRoute.MEDIA
+            if (currentRoute == AudioRoute.NAVIGATION) navigationGroups++ else mediaGroups++
+        }
+        val route = currentRoute
+        val lane = if (route == AudioRoute.NAVIGATION) navLane else mediaLane
         val body = usableDeclared - prefix
         if (body <= 0) {
             oddFrames++
@@ -175,11 +236,11 @@ internal class PrivateAudioFrames {
         // 1210 那包的尾巴 2 字节不是填充，而是下一个采样的前半（低 16 位）。
         // v21 每包各自裁掉它，等于每 42.5ms 丢半个采样 —— 又一个周期性的「咔」。
         // 现在把不足一帧的尾巴留到下一包拼上，一字节都不丢。
-        val total = carrySize + body
+        val total = lane.carrySize + body
         val whole = total - total % frameBytes
         if (whole <= 0) {
             // 连一帧都凑不齐：整段留着等下一包（不会丢）。
-            appendCarry(payload, dataAt, body)
+            appendCarry(lane, payload, dataAt, body)
             oddFrames++
             return null
         }
@@ -191,46 +252,58 @@ internal class PrivateAudioFrames {
         val keptBody = body - tail
         val data: ByteArray
         val at: Int
-        if (carrySize == 0) {
+        if (lane.carrySize == 0) {
             // 没有残留：直接引用原数组，零拷贝。
             data = payload
             at = dataAt
-            carrySize = 0
-            appendCarry(payload, dataAt + keptBody, tail)
+            lane.carrySize = 0
+            appendCarry(lane, payload, dataAt + keptBody, tail)
         } else {
             // 有残留：拼到复用缓冲里，避免每包新建数组（每秒 137 次分配会让车机 GC 抖）。
-            data = ensureBuffer(whole)
-            System.arraycopy(carry, 0, data, 0, carrySize)
-            System.arraycopy(payload, dataAt, data, carrySize, keptBody)
+            data = lane.ensureBuffer(whole)
+            System.arraycopy(lane.carry, 0, data, 0, lane.carrySize)
+            System.arraycopy(payload, dataAt, data, lane.carrySize, keptBody)
             at = 0
             // 尾巴换成这一包末尾的字节。
-            System.arraycopy(payload, dataAt + keptBody, carry, 0, tail)
-            carrySize = tail
+            System.arraycopy(payload, dataAt + keptBody, lane.carry, 0, tail)
+            lane.carrySize = tail
         }
         if (tail > 0) oddFrames++
         seen++
-        return Frame(sequence, data, at, whole)
+        return Frame(sequence, data, at, whole, route)
     }
 
-    /** 不足一帧、留到下一包拼接的尾巴（最多 [frameBytes] − 1 字节）。 */
-    private val carry = ByteArray(MAX_FRAME_BYTES)
-    private var carrySize = 0
+    /**
+     * 一路音频的跨包拼接状态。
+     *
+     * 为什么每路各一份：导航播报时手机把「音乐」「导航」两条独立 PCM 流交织在同一条连接上，
+     * 一组 8186 字节不是 4 的整数倍，最后一个采样的后半（2 字节）要留到**同一路的下一包**拼上。
+     * 共用一份 carry 会把音乐那组的半采样拼到导航那组前面，两路都碎。
+     */
+    private class Lane {
+        val carry = ByteArray(MAX_FRAME_BYTES)
+        var carrySize = 0
+        private var buffer = ByteArray(0)
 
-    /** 拼接用的复用缓冲，按需长大。 */
-    private var buffer = ByteArray(0)
-
-    private fun ensureBuffer(size: Int): ByteArray {
-        if (buffer.size < size) buffer = ByteArray(size)
-        return buffer
+        fun ensureBuffer(size: Int): ByteArray {
+            if (buffer.size < size) buffer = ByteArray(size)
+            return buffer
+        }
     }
 
-    private fun appendCarry(data: ByteArray, at: Int, length: Int) {
+    private val mediaLane = Lane()
+    private val navLane = Lane()
+
+    /** 当前组属于哪一路（组头 +10 判定，组内后续包沿用）。 */
+    private var currentRoute = AudioRoute.MEDIA
+
+    private fun appendCarry(lane: Lane, data: ByteArray, at: Int, length: Int) {
         if (length <= 0) {
-            carrySize = 0
+            lane.carrySize = 0
             return
         }
-        System.arraycopy(data, at, carry, 0, length)
-        carrySize = length
+        System.arraycopy(data, at, lane.carry, 0, length)
+        lane.carrySize = length
     }
 
     /**
@@ -293,6 +366,12 @@ internal class PrivateAudioFrames {
 
         /** 旧名字，保留给上层诊断用。 */
         const val TYPE_INFO = 0x0301
+
+        /**
+         * 组头 +10 的路由标记：导航那条流是 0x1000（4096），音乐是 0x8（8）。
+         * 这是唯一可靠的区分字段（时间戳奇偶会因丢包错位）。
+         */
+        const val ROUTE_NAVIGATION_MARKER = 0x1000L
 
         /** 一包数据的上限：正常 1400，留余量给手机换采样率或声道数。 */
         private const val MAX_DATA = 8192

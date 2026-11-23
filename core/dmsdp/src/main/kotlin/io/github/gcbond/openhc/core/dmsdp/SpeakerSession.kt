@@ -275,33 +275,49 @@ internal class SpeakerSession(
                     "帧头对不上 ${parser.bad}、剥组头 ${parser.stripped}、裁尾巴 ${parser.odd}、" +
                     "序号跳变 ${parser.gaps}；类型 ${parser.typeHistogram()}",
             )
+            note(stream.info, "私有帧时钟：${parser.clockRate()}")
+            note(stream.info, parser.routeHistogram())
             // 第一次统计时把各类型的数据区头部打出来：确定它前面有没有元数据头。
             if (parser.frames == 500L) note(stream.info, "私有帧各类型头部：${parser.headSamples()}")
         }
         if (parser.frames == 1L) {
             emit(AudioEvent.FirstPacket(stream.info, PRIVATE_PAYLOAD_TYPE, frame.length))
         }
-        val packet = privatePacket ?: AudioPacket(stream.info).also { privatePacket = it }
+        // 按路分配 SSRC 和用途：上层 AudioOutput 按 ssrc 建独立播放器，
+        // 音乐和导航各有自己的缓冲和音量（导航出声时把音乐压低）。
+        val navigation = frame.route == AudioRoute.NAVIGATION
+        val ssrc = if (navigation) PRIVATE_NAV_SSRC else PRIVATE_SSRC
+        val packet = if (navigation) {
+            navPacket ?: AudioPacket(stream.info).also { navPacket = it }
+        } else {
+            privatePacket ?: AudioPacket(stream.info).also { privatePacket = it }
+        }
         packet.stream = stream.info
         packet.sequence = frame.sequence
         packet.timestamp = 0
-        packet.ssrc = PRIVATE_SSRC
+        packet.ssrc = ssrc
         packet.payloadType = PRIVATE_PAYLOAD_TYPE
         packet.marker = false
         packet.bus = AudioBus.UNKNOWN
-        packet.usage = 0
+        packet.usage = if (navigation) NAVIGATION_USAGE else 0
         packet.data = frame.data
         packet.offset = frame.offset
         packet.length = frame.length
         packet.byteOrder = PcmByteOrder.LITTLE_ENDIAN
         packet.playable = true
         packet.codec = AudioCodec.PCM
-        packet.route = AudioRoute.MEDIA
+        packet.route = frame.route
         // 鸿蒙 4.2 每 3 秒拆一次数据会话再换新号重开，但声音其实是同一条流。
         // 标成连续的，上层就不会跟着数据会话关播放器（否则每 3 秒卡一下）。
         packet.continuous = true
-        if (parser.frames == 1L) {
-            emit(AudioEvent.StreamRouted(stream.info, PRIVATE_SSRC, packet.bus, 0, AudioRoute.MEDIA))
+        // 每路第一包报一次路由，上层据此建播放器。
+        if (navigation) {
+            if (!navFirst) {
+                navFirst = true
+                emit(AudioEvent.StreamRouted(stream.info, ssrc, packet.bus, NAVIGATION_USAGE, frame.route))
+            }
+        } else if (parser.frames == 1L) {
+            emit(AudioEvent.StreamRouted(stream.info, ssrc, packet.bus, 0, frame.route))
         }
         check?.onPacket(packet.codec, packet.playable)?.let { verdict(it) }
         guard("onAudioPacket") { listener.onAudioPacket(packet) }
@@ -310,6 +326,12 @@ internal class SpeakerSession(
     /** 这次连接上控制通道里的私有音频帧；没出现过就是 null。 */
     private var privateFrames: PrivateAudioFrames? = null
     private var privatePacket: AudioPacket? = null
+
+    /** 导航那一路的复用包（和音乐分开，两条流各自有 ssrc/usage）。 */
+    private var navPacket: AudioPacket? = null
+
+    /** 导航那一路报过路由没有（只报一次，上层据此建播放器）。 */
+    private var navFirst = false
 
     /**
      * 控制连接私有帧用的那条流。手机每 3 秒换一个数据会话号，声音其实没断，
@@ -590,6 +612,12 @@ internal class SpeakerSession(
          */
         const val PRIVATE_SSRC = 0x0302_0001L
         const val PRIVATE_PAYLOAD_TYPE = 0
+
+        /** 导航那一路单独的 SSRC：上层按它建第二个播放器（短缓冲、压低音乐）。 */
+        const val PRIVATE_NAV_SSRC = 0x0302_0002L
+
+        /** 导航的用途号（AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE）。 */
+        const val NAVIGATION_USAGE = 12
 
         /** DataSessionID：十进制整数，可能带负号。 */
         private val SESSION_ID = Regex("-?[0-9]{1,19}")
