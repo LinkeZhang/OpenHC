@@ -146,6 +146,9 @@ class AudioPlayer(
     private var dead = false
     private var decoder: MediaCodec? = null
     private var decoderErrors = 0
+
+    /** 已经打印过几条 AAC 帧诊断（只打前几条，免得刷屏）。 */
+    private var decoderDiagnostics = 0
     private var presentationUs = 0L
     private var pcm = ByteArray(PCM_SCRATCH)
     private val info = MediaCodec.BufferInfo()
@@ -405,10 +408,24 @@ class AudioPlayer(
     // ---------------- AAC ----------------
 
     private fun decode(unit: ByteArray) {
-        val adts = AacConfig.parseAdts(unit, 0, unit.size)
-        val from = adts?.headerLength ?: 0
-        val to = adts?.frameLength ?: unit.size
+        // 不假设 ADTS 头就在载荷开头：鸿蒙 NEXT 会在前面加 12 字节私有头，见 AacConfig.findAdts。
+        val found = AacConfig.findAdts(unit, 0, unit.size)
+        val adts = found?.first
+        // 找到头就从头的后面开始送；没找到就整包送（配置走 csd-0 的裸 AAC 帧就是这样）。
+        val from = found?.let { it.second + it.first.headerLength } ?: 0
+        val to = found?.let { it.second + it.first.frameLength } ?: unit.size
         if (to <= from) return
+        if (decoderDiagnostics < DIAGNOSTIC_FRAMES) {
+            decoderDiagnostics++
+            val head = StringBuilder()
+            for (i in 0 until minOf(24, unit.size)) head.append(String.format("%02x", unit[i]))
+            android.util.Log.i(
+                "OpenHC-AacFrame",
+                "[$usage] AAC 帧 #$decoderDiagnostics：整包 ${unit.size} 字节，" +
+                    "ADTS=${if (adts != null) "在偏移 ${found!!.second}、头 ${adts.headerLength} 字节、帧长 ${adts.frameLength}、采样率 ${adts.sampleRate}、声道 ${adts.channelConfig}" else "没认出来"}，" +
+                    "送解码器 [$from, $to) 共 ${to - from} 字节；前 ${minOf(24, unit.size)} 字节=$head",
+            )
+        }
         val codec = decoder ?: createDecoder(adts) ?: return
         try {
             val index = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
@@ -556,6 +573,9 @@ class AudioPlayer(
         /** 送进一帧后等它解出来的上限。 */
         const val OUTPUT_WAIT_US = 5_000L
         const val MAX_DECODER_ERRORS = 5
+
+        /** 打印前几帧 AAC 的字节诊断，用来定位「解码器一直报 0x4004」这类帧格式问题。 */
+        private const val DIAGNOSTIC_FRAMES = 6
         const val PCM_SCRATCH = 16 * 1024
         const val UINT32 = 0xFFFF_FFFFL
     }

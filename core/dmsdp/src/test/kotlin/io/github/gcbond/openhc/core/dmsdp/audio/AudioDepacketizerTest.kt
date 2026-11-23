@@ -386,6 +386,27 @@ class AudioDepacketizerTest {
         assertFalse(Adts.looksLike(short + ByteArray(5), 0, short.size + 5), "帧长 7 小于带 CRC 的头长 9")
     }
 
+    /**
+     * 鸿蒙 NEXT 的 AAC 载荷前面多带 12 字节私有头
+     * （`00 03 | 01 01 | 00 00 00 00 | 长度(2) | 长度(2)`），真正的 ADTS 从偏移 12 开始。
+     *
+     * 数据是 2026-11-23 安卓 5.1 + NEXT 手机真机日志里原样抄下来的：只看偏移 0 时是 `00 03`，
+     * 认不出 ADTS 就整包送进解码器，每帧报 `0x4004 TRANSPORT_SYNC_ERROR` 输出静音——
+     * 投屏正常但一点声音没有。
+     */
+    @Test
+    fun adtsAfterPrivatePrefixIsRecognised() {
+        // 真机那帧整包 396 字节，这里只抄了前 24 字节，补零到真实长度（ADTS 声明帧长 380，12 + 380 = 392 ≤ 396）。
+        val head = hexToBytes("00030101000000000004017cfff14c802f9ffc214cccfa05")
+        val prefixed = head + ByteArray(396 - head.size)
+        assertTrue(Adts.looksLike(prefixed, 0, prefixed.size), "ADTS 在偏移 12，也要认出来")
+        val prefixOnly = hexToBytes("00030101000000000004017c")
+        assertFalse(Adts.looksLike(prefixOnly, 0, prefixOnly.size), "只有私有头、没有 ADTS 时不算")
+    }
+
+    private fun hexToBytes(hex: String): ByteArray =
+        ByteArray(hex.length / 2) { ((Character.digit(hex[it * 2], 16) shl 4) or Character.digit(hex[it * 2 + 1], 16)).toByte() }
+
     /** 单看一包，以 FF F0 开头的 PCM 也可能凑出合法的 ADTS 头；按识别用的几包多数决定，一包不会改变结论。 */
     @Test
     fun oneAdtsLookingPcmPacketDoesNotFlipTheDecision() {

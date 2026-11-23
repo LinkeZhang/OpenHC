@@ -34,15 +34,20 @@ class AudioPlaybackLogicTest {
     }
 
     @Test
-    fun backlogBeyondTheLimitDropsTheOldestDownToTarget() {
+    fun backlogBeyondTheLimitDropsTheOldestOnlyDownToTheLimit() {
+        // 超限只丢到**上限**，不再一次砍回目标值。
+        //
+        // 以前丢到 targetFrames：视频突发堆进 3 秒，就从最旧丢掉 1.5 秒，听感是
+        // 「声音没了、然后跳过一大段」。这些数据 TCP 一个字节都没丢，只是晚到，
+        // 本来全能播；砍到上限只丢掉真正超出的那部分。
         val queue = AudioJitterQueue(startFrames = 100, targetFrames = 400, maxFrames = 600)
         val chunks = (0 until 6).map { chunk(100) }
         for (c in chunks) assertEquals(0, queue.offer(c, 100))
         val dropped = queue.offer(chunk(100), 100)
-        assertEquals(300, dropped, "700 > 600：丢到 400")
-        assertEquals(400, queue.bufferedFrames)
-        assertEquals(300, queue.droppedFrames)
-        assertSame(chunks[3], queue.take(0)?.data, "最旧的三块被丢掉")
+        assertEquals(100, dropped, "700 > 600：只丢到 600，丢最旧的一块")
+        assertEquals(600, queue.bufferedFrames)
+        assertEquals(100, queue.droppedFrames)
+        assertSame(chunks[1], queue.take(0)?.data, "最旧的一块被丢掉，其余保留")
     }
 
     @Test

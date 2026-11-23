@@ -48,7 +48,7 @@ object PcmTrack {
             rejection = "声道 $choice 号被系统拒绝（${why?.javaClass?.simpleName}：${why?.message}），改按用途建"
         }
         val attrs = usage.trackAttributes()
-        // AudioAttributes / AudioTrack.Builder 是 API 21 起；安卓 4.1 上 PlatformCompat 会退回老构造
+        // AudioTrack.Builder 是 API 23 起；API 16～22 上 PlatformCompat 会退回老构造
         // AudioTrack(streamType, …)，用途换算成对应的 streamType（见 AudioUsage.legacyStreamType）。
         val lowLatencyRequested = lowLatency && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
         val track = io.github.gcbond.openhc.platform.compat.PlatformCompat.newTrack(

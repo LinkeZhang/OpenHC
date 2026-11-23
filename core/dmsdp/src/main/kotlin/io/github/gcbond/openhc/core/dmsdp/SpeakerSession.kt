@@ -273,35 +273,53 @@ internal class SpeakerSession(
                 stream.info,
                 "私有帧统计：放 ${parser.frames} 包、非音频跳过 ${parser.skipped}、" +
                     "帧头对不上 ${parser.bad}、剥组头 ${parser.stripped}、裁尾巴 ${parser.odd}、" +
-                    "序号跳变 ${parser.gaps}；类型 ${parser.typeHistogram()}",
+                    "序号跳变 ${parser.gaps}；类型 ${parser.typeHistogram()}；module ${parser.moduleHistogram()}；" +
+                    parser.stampHistogram(),
             )
+            note(stream.info, "私有帧时钟：${parser.clockRate()}")
+            note(stream.info, parser.groupTraceText())
+            note(stream.info, parser.groupHeadsText())
+            note(stream.info, parser.routeHistogram())
+            note(stream.info, parser.continuityText())
             // 第一次统计时把各类型的数据区头部打出来：确定它前面有没有元数据头。
-            if (parser.frames == 500L) note(stream.info, "私有帧各类型头部：${parser.headSamples()}")
+            if (parser.frames == 500L) {
+                note(stream.info, "私有帧各类型头部：${parser.headSamples()}")
+                note(stream.info, "组头连续样本：${parser.stampSamples()}")
+            }
         }
         if (parser.frames == 1L) {
             emit(AudioEvent.FirstPacket(stream.info, PRIVATE_PAYLOAD_TYPE, frame.length))
         }
-        val packet = privatePacket ?: AudioPacket(stream.info).also { privatePacket = it }
+        // 两路（音乐 / 导航）用不同的 ssrc：播放层按 ssrc 建播放器，
+        // 这样音乐压低、导航突出才能分别控制音量。
+        val nav = frame.route == AudioRoute.NAVIGATION
+        val packet = (if (nav) navPacket else privatePacket) ?: AudioPacket(stream.info).also {
+            if (nav) navPacket = it else privatePacket = it
+        }
         packet.stream = stream.info
         packet.sequence = frame.sequence
         packet.timestamp = 0
-        packet.ssrc = PRIVATE_SSRC
+        packet.ssrc = if (nav) PRIVATE_NAV_SSRC else PRIVATE_SSRC
         packet.payloadType = PRIVATE_PAYLOAD_TYPE
         packet.marker = false
         packet.bus = AudioBus.UNKNOWN
-        packet.usage = 0
+        packet.usage = if (nav) NAVIGATION_USAGE else 0
         packet.data = frame.data
         packet.offset = frame.offset
         packet.length = frame.length
         packet.byteOrder = PcmByteOrder.LITTLE_ENDIAN
         packet.playable = true
         packet.codec = AudioCodec.PCM
-        packet.route = AudioRoute.MEDIA
+        packet.route = frame.route
         // 鸿蒙 4.2 每 3 秒拆一次数据会话再换新号重开，但声音其实是同一条流。
         // 标成连续的，上层就不会跟着数据会话关播放器（否则每 3 秒卡一下）。
         packet.continuous = true
         if (parser.frames == 1L) {
             emit(AudioEvent.StreamRouted(stream.info, PRIVATE_SSRC, packet.bus, 0, AudioRoute.MEDIA))
+        }
+        if (nav && navFirst) {
+            navFirst = false
+            emit(AudioEvent.StreamRouted(stream.info, PRIVATE_NAV_SSRC, packet.bus, NAVIGATION_USAGE, AudioRoute.NAVIGATION))
         }
         check?.onPacket(packet.codec, packet.playable)?.let { verdict(it) }
         guard("onAudioPacket") { listener.onAudioPacket(packet) }
@@ -310,6 +328,9 @@ internal class SpeakerSession(
     /** 这次连接上控制通道里的私有音频帧；没出现过就是 null。 */
     private var privateFrames: PrivateAudioFrames? = null
     private var privatePacket: AudioPacket? = null
+    /** 导航那一路的包和「首次」标记（两路各用一个复用的包对象）。 */
+    private var navPacket: AudioPacket? = null
+    private var navFirst = true
 
     /**
      * 控制连接私有帧用的那条流。手机每 3 秒换一个数据会话号，声音其实没断，
@@ -589,6 +610,20 @@ internal class SpeakerSession(
          * 但播放链路按 SSRC 分路、按载荷类型记日志，给个固定的占位值就行。
          */
         const val PRIVATE_SSRC = 0x0302_0001L
+
+        /**
+         * 导航那一路的假 SSRC。
+         *
+         * 鸿蒙 4.2 导航播报时把「音乐」和「导航」两条独立 PCM 流交织在同一条控制连接上发，
+         * 组头 +10 的字段分别是 8 和 0x1000（见 [PrivateAudioFrames.ROUTE_NAVIGATION_MARKER]）。
+         * 给导航一路单独的 SSRC，播放层就会为它建**单独的播放器和音轨**，
+         * 于是「导航时把音乐压低、突出导航」才能实现（[io.github.gcbond.openhc.audio.AudioOutput]）。
+         */
+        const val PRIVATE_NAV_SSRC = 0x0302_0002L
+
+        /** 导航那一路的用途号（安卓 `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE` = 12）。 */
+        const val NAVIGATION_USAGE = 12
+
         const val PRIVATE_PAYLOAD_TYPE = 0
 
         /** DataSessionID：十进制整数，可能带负号。 */

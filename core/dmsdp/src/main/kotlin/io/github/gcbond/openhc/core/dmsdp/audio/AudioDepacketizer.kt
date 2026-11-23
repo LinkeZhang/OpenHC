@@ -613,21 +613,33 @@ internal object PcmPacketHeader {
 /**
  * ADTS 头的粗判（ISO/IEC 13818-7）：同步字 0xFFF、layer 00、采样率索引在标准表里（0～12）、
  * 头长（7 或带 CRC 的 9）≤ 帧长 ≤ 数据长度。帧长不要求正好等于数据长度：尾部多几个字节也算。
+ *
+ * 不要求头正好在开头：鸿蒙 NEXT 手机在 RTP 载荷前面多带 12 字节私有头
+ * （`00 03 | 01 01 | 00 00 00 00 | 长度(2) | 长度(2)`），真正的 ADTS 从偏移 12 才开始。
+ * 只在开头 [MAX_LEADING] 字节里找，找到合法的就算。
  */
 internal object Adts {
     fun looksLike(data: ByteArray, offset: Int, length: Int): Boolean {
         if (length < HEADER) return false
-        fun u8(i: Int) = data[offset + i].toInt() and 0xFF
-        if (u8(0) != 0xFF || u8(1) and 0xF6 != 0xF0) return false
-        val header = if (u8(1) and 0x01 != 0) HEADER else HEADER_WITH_CRC
-        if ((u8(2) ushr 2) and 0x0F > MAX_SAMPLE_RATE_INDEX) return false
-        val frameLength = ((u8(3) and 0x03) shl 11) or (u8(4) shl 3) or (u8(5) ushr 5)
-        return frameLength in header..length
+        val last = minOf(length - HEADER, MAX_LEADING)
+        for (skip in 0..last) {
+            if (data[offset + skip].toInt() and 0xFF != 0xFF) continue
+            fun u8(i: Int) = data[offset + skip + i].toInt() and 0xFF
+            if (u8(1) and 0xF6 != 0xF0) continue
+            val header = if (u8(1) and 0x01 != 0) HEADER else HEADER_WITH_CRC
+            if ((u8(2) ushr 2) and 0x0F > MAX_SAMPLE_RATE_INDEX) continue
+            val frameLength = ((u8(3) and 0x03) shl 11) or (u8(4) shl 3) or (u8(5) ushr 5)
+            if (frameLength in header..(length - skip)) return true
+        }
+        return false
     }
 
     private const val HEADER = 7
     private const val HEADER_WITH_CRC = 9
     private const val MAX_SAMPLE_RATE_INDEX = 12
+
+    /** 最多往后找这么多字节：12 字节私有头 + 余量。 */
+    private const val MAX_LEADING = 32
 }
 
 /** 按 RFC 3550 解析的 RTP 头；也认 RTCP（第二字节 200～204）。 */

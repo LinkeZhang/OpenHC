@@ -7,6 +7,7 @@ import android.media.MediaFormat
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.Choreographer
@@ -773,6 +774,9 @@ class VideoDecoder @JvmOverloads constructor(
 
     /** 送出队首扣着的帧：输出不在视图 Surface 上就不上屏；解码器已经换了、正在 flush 就只出队、不送。 */
     private fun releaseHead(nowNs: Long) {
+        // 没有扣着的帧就直接返回。正常路径上调用方已经判过 pacer.queued > 0，
+        // 这里再兜一次：宁可少送一帧，也不能因为队列空了把整个进程崩掉。
+        if (pacer.queued <= 0) return
         val index = heldIndices[0]
         for (i in 1 until pacer.queued) heldIndices[i - 1] = heldIndices[i]
         pacer.onHeadDue(nowNs, vsyncGrid, deadlineNs())
@@ -1183,17 +1187,34 @@ class VideoDecoder @JvmOverloads constructor(
 
     // ---------------------------------------------------------------- 解码线程
 
+    /**
+     * 把回调体切到解码线程上执行，保证 pacer / heldIndices / presenter 这些「解码线程独占」的状态只被一个线程改。
+     *
+     * 为什么需要：`setCallback(callback, handler)` 是 API 23 才有的重载，API 21～22 只能用
+     * `setCallback(callback)`——它绑在**调用 setCallback 那个线程**的 Looper 上，而 configureLocked 是在
+     * 喂数据的线程（主线程）里跑的，于是解码回调落到了主线程，和 handler 上的节拍任务并发改同一个队列：
+     * 一边把 pacer.queued 减到 0，另一边在 onHeadDue 里 check(queued > 0) 就抛
+     * `IllegalStateException: 没有扣着的帧`（2026-11-23 安卓 5.1 点音乐播放后闪退即此）。
+     * 已经在解码线程上就直接执行，不额外投递。
+     */
+    private inline fun onDecoderThread(crossinline body: () -> Unit) {
+        if (Looper.myLooper() === thread.looper) body() else handler.post { body() }
+    }
+
     // 只在 API 21+ 实例化（见 codecCallback 的惰性初始化），4.x 走同步轮询。
     @android.annotation.TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private inner class CodecCallback : MediaCodec.Callback() {
-        override fun onInputBufferAvailable(c: MediaCodec, index: Int) = onInputAvailable(c, index)
+        override fun onInputBufferAvailable(c: MediaCodec, index: Int) =
+            onDecoderThread { onInputAvailable(c, index) }
 
         override fun onOutputBufferAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) =
-            onOutputAvailable(c, index, info)
+            onDecoderThread { onOutputAvailable(c, index, info) }
 
-        override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) = onFormatChanged(c, format)
+        override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) =
+            onDecoderThread { onFormatChanged(c, format) }
 
-        override fun onError(c: MediaCodec, e: MediaCodec.CodecException) = onCodecError(c, e)
+        override fun onError(c: MediaCodec, e: MediaCodec.CodecException) =
+            onDecoderThread { onCodecError(c, e) }
     }
 
     // 下面这几个是回调的实际内容。异步模式（API 21+）由 CodecCallback 调用，

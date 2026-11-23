@@ -92,8 +92,14 @@ class AudioJitterQueue(
         buffered += frames
         var droppedNow = 0L
         if (buffered > maxFrames) {
-            // 从最旧的丢起，至少留下刚放进来的这一块。
-            while (buffered > targetFrames && chunks.size > 1) {
+            // 只丢到**上限**为止，不要一次砍回目标值。
+            //
+            // 以前丢到 [targetFrames]：视频突发一下堆进 3 秒，就从最旧丢掉 1.5 秒，
+            // 听感是「声音没了、然后跳过一大段」。可这些数据 TCP 一个字节都没丢，
+            // 只是晚到几十毫秒到一两秒，本来全能播出来。
+            // 现在只砍掉超过上限的部分，多出来的照样播，代价只是延迟高一点。
+            // 平均到达速率和播放速率相等，突发堆进来的量会自己排空，不会永久堆积。
+            while (buffered > maxFrames && chunks.size > 1) {
                 val old = chunks.removeFirst()
                 buffered -= old.frames
                 droppedNow += old.frames

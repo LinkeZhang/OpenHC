@@ -50,6 +50,64 @@ internal class AudioOutput(
     private val prefs = AudioPreferences(app)
     private val tuning: AudioTuning = prefs.playbackTuning()
 
+    /**
+     * 鸿蒙 4.2 控制连接私有帧（连续流）用的播放参数：比默认多攒一些。
+     *
+     * 实测这台手机每 3 秒拆一次数据会话、几十毫秒后再请求新的（见 [SpeakerSession.feedPrivateFrame]），
+     * 换号那一瞬间声音会停发约 50～70ms。默认参数只有 80ms 起播门槛、40ms 音轨缓冲，
+     * 稳态队列又常年在 20～48ms，盖不住这个空档：每 3 秒「放空 → 暂停 → 重新攒 85ms → 再出声」，
+     * 听起来就是规律性的一下卡顿。
+     *
+     * 这里把起播门槛提到 200ms、音轨缓冲提到 120ms，留足余量盖过那 70ms 的停发，
+     * 代价是声音整体晚约 120ms（投屏场景听不出来）。
+     */
+    private val continuousTuning: AudioTuning = prefs.playbackTuning().let {
+        AudioTuning(
+            // 起播门槛给足：第一批数据是突发来的（实测 742～1157 包/秒），
+            // 攒到 400ms 就急着放，后面紧跟的低谷立刻把它放空，开头会抖好几秒。
+            // 攒到 1000ms 再出声，一次到位，之后靠 1500ms 的削峰目标维持。
+            startMillis = 1_000,
+            // 削峰目标就是长期维持的缓冲量。控制连接上音频和视频、文本挤在一条 TCP 里，
+            // 实测到达速率在 111～1157 包/秒之间剧烈抖动（v276 日志），低谷持续 1 秒以上。
+            // 缓冲要够厚才能把这些低谷抹平，代价是声音晚约 1 秒（投屏场景听不出）。
+            targetMillis = 1_500,
+            maxMillis = 3_000,
+            trackMillis = 300,
+            // 不要「起播窗口内压回目标」：它会把刚到的突发削掉，紧接着的低谷就没人补，直接放空。
+            startWindowMillis = 0,
+            // 也不要长期削峰：削掉的数据补不回来，只会让后续更空。
+            trimHoldMillis = 600_000,
+            extraDelayMillis = it.extraDelayMillis,
+            lowLatency = false,
+            mediaStream = it.mediaStream,
+            navigationStream = it.navigationStream,
+        )
+    }
+
+    /**
+     * 导航播报那一路的播放参数：短缓冲。
+     *
+     * 导航是一句一句的短音频，攒太多会让每句开头缺字。90ms 起播 / 60ms 目标 / 300ms 上限，
+     * 足够吸收控制连接上的抖动，又不至于把开头吃掉。
+     */
+    private val navigationTuning: AudioTuning = prefs.playbackTuning().let {
+        AudioTuning(
+            // 和音乐同理：起播门槛给足，别攒一点点就出声（那样第一句导航必断）。
+            startMillis = 500,
+            // 导航和音乐一样走那条拥挤的控制连接，到达抖动同样剧烈（实测低谷 1 秒以上）。
+            // 缓冲不能只给 90ms，否则每句导航都要断好几次；给 800ms 仍比音乐短，听感上不至于拖。
+            targetMillis = 800,
+            maxMillis = 1_500,
+            trackMillis = 150,
+            startWindowMillis = 0,
+            trimHoldMillis = 600_000,
+            extraDelayMillis = 0,
+            lowLatency = false,
+            mediaStream = it.mediaStream,
+            navigationStream = it.navigationStream,
+        )
+    }
+
     /** 抓包到第一次有音频回调时才建（没声明扬声器、手机没要声音的连接不用开线程和文件）。 */
     private var capture: AudioCapture? = null
 
@@ -70,6 +128,9 @@ internal class AudioOutput(
      * 手机每 3 秒拆一次数据会话换新号，但声音是连着的一条，不能跟着会话拆播放器。
      */
     private data class StreamKey(val dataSessionId: String, val ssrc: Long, val route: AudioRoute)
+
+    /** 导航播报时音乐保留的音量比例（再乘上焦点给的音量）。 */
+    private val NAVIGATION_DUCK_VOLUME = 0.3f
 
     /** 一路声音。[sounding] 跟着播放器的「开始出声 / 放空」走，焦点按它算这个用途还在不在响。 */
     private inner class Stream(val key: StreamKey, val usage: AudioUsage, val bus: Int) : AudioPlayer.Listener {
@@ -96,6 +157,10 @@ internal class AudioOutput(
         fun sound(on: Boolean) {
             if (on == sounding || (on && finished)) return
             sounding = on
+            // 导航播报开始/结束：音乐那一路跟着压低 / 恢复。
+            // 鸿蒙 4.2 把音乐和导航交织在同一条控制连接上，这里靠 route 分成两个播放器，
+            // 才有机会只压音乐、不压导航。见 [duckForNavigation]。
+            if (key.route == AudioRoute.NAVIGATION) duckForNavigation(on)
             val controller = focusController() ?: return
             if (on) controller.soundStarted(usage) else controller.soundStopped(usage)
         }
@@ -299,15 +364,46 @@ internal class AudioOutput(
         }
         val usage = usageOf(packet.route)
         val stream = Stream(key, usage, packet.bus)
-        stream.player = AudioPlayer(format, stream, tuning, usage)
+        // 连续流（鸿蒙 4.2 控制连接私有帧）用攒得更多的参数：手机每 3 秒换号会停发几十毫秒，
+        // 默认的 80ms 起播 / 40ms 音轨盖不住，会每 3 秒放空卡一下。见 [continuousTuning]。
+        //
+        // 导航那一路用**短缓冲**：导航播报是「说完就停」的短句，攒 300ms 才出声会让
+        // 每句开头的第一个字被吃掉，而且导航结束后那 300ms 的尾巴会拖出来。
+        // 音乐那一路是连续的，用长缓冲盖住手机每 3 秒换会话的停发。
+        val chosen = when {
+            packet.route == AudioRoute.NAVIGATION -> navigationTuning
+            packet.continuous -> continuousTuning
+            else -> tuning
+        }
+        stream.player = AudioPlayer(format, stream, chosen, usage)
         volumes[usage]?.let { stream.player.setVolume(it) }
         streams[key] = stream
         DiagnosticLog.log(
             TAG,
             "[$attemptId] 建播放器：${stream.label()}，$format，音轨用途 ${usage.label}" +
-                "（按载荷判断是 ${packet.codec.label}，声明的是 ${info.codec.label}）；$tuning",
+                "（按载荷判断是 ${packet.codec.label}，声明的是 ${info.codec.label}）；$chosen",
         )
         return stream
+    }
+
+    /**
+     * 导航播报时把音乐压低。
+     *
+     * 为什么需要：鸿蒙 4.2 在导航播报时把「音乐」和「导航」两条独立 PCM 流交织在同一条
+     * 控制连接上发（组头 +10 字段 8 / 0x1000 区分，见 [PrivateAudioFrames]）。以前两路被
+     * 当成一条流混着播，既卡又听不清导航。现在分成两个播放器，导航一出声就把音乐压到
+     * [NAVIGATION_DUCK_VOLUME]，导航播完恢复。
+     *
+     * 只在**导航真的在响**时压：导航那路放空（播报间隙）就恢复，不会一直闷着音乐。
+     */
+    private fun duckForNavigation(navigating: Boolean) {
+        val media = synchronized(lock) {
+            streams.values.filter { it.key.route == AudioRoute.MEDIA }
+        }
+        for (stream in media) {
+            val base = synchronized(lock) { volumes[stream.usage] } ?: 1f
+            stream.player.setVolume(if (navigating) base * NAVIGATION_DUCK_VOLUME else base)
+        }
     }
 
     private fun unsupported(stream: AudioStreamInfo, why: String): Stream? {

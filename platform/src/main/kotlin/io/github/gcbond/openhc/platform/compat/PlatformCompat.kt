@@ -27,12 +27,13 @@ object PlatformCompat {
     /**
      * 按用途建一条 16 位 PCM 流式音轨。
      *
-     * `AudioAttributes` 和 `AudioTrack.Builder` 都是 API 21/23 才有的，4.1 上只能用老构造
+     * `AudioTrack.Builder` 是 API 23（安卓 6.0）才有的；`AudioAttributes` 是 API 21。
+     * 所以 23+ 用 Builder，21～22 和 4.x 都用老构造
      * `AudioTrack(streamType, rate, mask, encoding, bufferSize, MODE_STREAM)`。老的 streamType 和新的 usage
      * 大体对应（见 [legacyStreamType]），车机按 streamType 选音量档，效果和按 usage 建接近。
      *
-     * @param usage 新接口的用途值（[AudioAttributes.USAGE_MEDIA] 等），只在 API 21+ 用。
-     * @param streamType 老接口的 streamType（[AudioManager.STREAM_MUSIC] 等），只在 API 16～20 用。
+     * @param usage 新接口的用途值（[AudioAttributes.USAGE_MEDIA] 等），只在 API 23+ 用。
+     * @param streamType 老接口的 streamType（[AudioManager.STREAM_MUSIC] 等），API 16～22 用。
      */
     fun newTrack(
         usage: Int,
@@ -43,8 +44,13 @@ object PlatformCompat {
         bufferBytes: Int,
         lowLatency: Boolean,
     ): AudioTrack {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-            // 4.x：老构造。没有低延迟输出（PERFORMANCE_MODE 是 API 26），也没有 AudioAttributes。
+        // AudioTrack.Builder 是 API 23（M）才有的，不是 21。
+        // 这里原来判的是 LOLLIPOP（21），安卓 5.1（API 22）会走进下面的 Builder 分支，
+        // 直接 NoClassDefFoundError: android.media.AudioTrack$Builder 把播放线程搞崩
+        // （2026-11-23 安卓 5.1 真机实测：点音乐播放即闪退）。
+        // 21～22 用「带 AudioAttributes 的老构造」，既能按用途建音轨，又不碰 Builder。
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            // 4.x：老构造。没有低延迟输出（PERFORMANCE_MODE 是 API 26）。
             @Suppress("DEPRECATION")
             return AudioTrack(
                 streamType,
