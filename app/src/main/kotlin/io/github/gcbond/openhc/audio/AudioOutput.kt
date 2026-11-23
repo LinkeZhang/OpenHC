@@ -50,6 +50,30 @@ internal class AudioOutput(
     private val prefs = AudioPreferences(app)
     private val tuning: AudioTuning = prefs.playbackTuning()
 
+    /**
+     * 鸿蒙 4.2 控制连接私有帧（连续流）用的播放参数：比默认多攒一些。
+     *
+     * 实测这台手机每 3 秒拆一次数据会话、几十毫秒后再请求新的（见 [SpeakerSession.feedPrivateFrame]），
+     * 换号那一瞬间声音会停发约 50～70ms。默认参数只有 80ms 起播门槛、40ms 音轨缓冲，
+     * 稳态队列又常年在 20～48ms，盖不住这个空档：每 3 秒「放空 → 暂停 → 重新攒 85ms → 再出声」，
+     * 听起来就是规律性的一下卡顿。
+     *
+     * 这里把起播门槛提到 200ms、音轨缓冲提到 120ms，留足余量盖过那 70ms 的停发，
+     * 代价是声音整体晚约 120ms（投屏场景听不出来）。
+     */
+    private val continuousTuning: AudioTuning = prefs.playbackTuning().let {
+        AudioTuning(
+            startMillis = 300,
+            targetMillis = 360,
+            maxMillis = 700,
+            trackMillis = 200,
+            extraDelayMillis = it.extraDelayMillis,
+            lowLatency = false,
+            mediaStream = it.mediaStream,
+            navigationStream = it.navigationStream,
+        )
+    }
+
     /** 抓包到第一次有音频回调时才建（没声明扬声器、手机没要声音的连接不用开线程和文件）。 */
     private var capture: AudioCapture? = null
 
@@ -299,13 +323,16 @@ internal class AudioOutput(
         }
         val usage = usageOf(packet.route)
         val stream = Stream(key, usage, packet.bus)
-        stream.player = AudioPlayer(format, stream, tuning, usage)
+        // 连续流（鸿蒙 4.2 控制连接私有帧）用攒得更多的参数：手机每 3 秒换号会停发几十毫秒，
+        // 默认的 80ms 起播 / 40ms 音轨盖不住，会每 3 秒放空卡一下。见 [continuousTuning]。
+        val chosen = if (packet.continuous) continuousTuning else tuning
+        stream.player = AudioPlayer(format, stream, chosen, usage)
         volumes[usage]?.let { stream.player.setVolume(it) }
         streams[key] = stream
         DiagnosticLog.log(
             TAG,
             "[$attemptId] 建播放器：${stream.label()}，$format，音轨用途 ${usage.label}" +
-                "（按载荷判断是 ${packet.codec.label}，声明的是 ${info.codec.label}）；$tuning",
+                "（按载荷判断是 ${packet.codec.label}，声明的是 ${info.codec.label}）；$chosen",
         )
         return stream
     }
