@@ -58,7 +58,8 @@
 
 **别人维护的版本**（OpenHC 作者没有测试过）
 
-- [LinkeZhang/OpenHC](https://github.com/LinkeZhang/OpenHC/releases)：OpenHC 的分支。它的作者在鸿蒙 4.2 手机上实测过；另有安卓 4.1～9 车机专用版，在安卓 5.1 和 9 的车机上实测过。
+- [LinkeZhang/OpenHC](https://github.com/LinkeZhang/OpenHC/releases)：OpenHC 的分支。主线（`main`）是「上游最新版 + 安卓 6.0 / 7.x 车机适配」，
+  在安卓 5.1、7.0、9 的车机上实测过；另有 `android4-support` 分支的安卓 4.1～4.4 车机版（独立的实验线，基于上游 0.2.0）。
   签名和 OpenHC 不同，装之前要先卸载 OpenHC。
 - [hicar-android-receiver](https://github.com/huducat586/hicar-android-receiver)：另一个开源的车机端（它的作者在鸿蒙 4 的手机上测过，目前只做无线）。
 
@@ -68,7 +69,8 @@
   每为一种老系统放宽一处，就可能把已经能用的车机改出问题，所以主线优先保证安卓 8.0 起的车机稳定。
 - 安卓 6、7 的车机：有线目前还能用，但出了问题不再专门适配；无线用不了。
 - 安卓 6.0 以下的车机：装不上 OpenHC。
-- 这些车机可以试试上面 LinkeZhang 的安卓 4.1～9 车机版。
+- 这些车机可以试试上面 LinkeZhang 的版本：主线补上了安卓 6.0 / 7.x 的热点和蓝牙地址读取（无线也能用），
+  `android4-support` 分支是安卓 4.1～4.4 的版本。
 
 **2. 手机不是纯血鸿蒙（鸿蒙 3.x / 4.x、荣耀）**
 
@@ -157,7 +159,8 @@
 - **[DiPlay](https://github.com/shihabal3amri/DiPlay)**（作者 [shihabal3amri](https://github.com/shihabal3amri)）：安卓车机上的开源 CarPlay 接收端。
   OpenHC 的很多思路和做法参考了它。感谢作者的开源分享。
 - **[LinkeZhang/OpenHC](https://github.com/LinkeZhang/OpenHC)**（作者 [LinkeZhang](https://github.com/LinkeZhang)）：OpenHC 的分支，
-  让鸿蒙 4.2 手机和安卓 8.0 以下的车机也能用 OpenHC。OpenHC 0.2.5、0.2.6 对鸿蒙 4.x 手机的兼容参考了它的发现。感谢！
+  把车机适配下探到安卓 6.0（旧接口开热点、蓝牙地址多路读取），并增强了诊断日志的导出。OpenHC 0.2.5、0.2.6 对鸿蒙 4.x 手机的
+  兼容参考了它的发现。感谢！
 - **OpenHarmony security_device_auth**：配对认证部分的代码移植自它（Apache-2.0）。
   用到的其他第三方组件和许可见 [第三方声明](docs/THIRD_PARTY_NOTICES.md)。
 
