@@ -130,7 +130,7 @@ private fun SettingsLeftColumn(settings: AppSettings, screen: ScreenSpec) {
     MediaKeySettingsSection()
 }
 
-/** 右列：连接方式、启动、声音。 */
+/** 右列：连接方式、启动、声音、诊断。 */
 @Composable
 private fun SettingsRightColumn(
     settings: AppSettings,
@@ -140,6 +140,7 @@ private fun SettingsRightColumn(
 ) {
     SettingsGroup(stringResource(R.string.settings_group_connection)) {
         WiredOnlySetting(wireless)
+        WirelessModeSetting(wireless)
         BluetoothAddressSection(settings, systemBluetoothAddress, onReadCandidates)
         LePairingSetting()
         UsbAutoConnectSettingsSection()
@@ -147,32 +148,7 @@ private fun SettingsRightColumn(
     }
     BootStartSettingsSection(autoConnect = wireless.connectOnBluetooth && !wireless.wiredOnly) { ConnectOnBluetoothSetting(wireless) }
     AudioSettingsSection()
-    DiagnosticSettingsSection()
-}
-
-/**
- * 诊断：查看应用自己记的连接日志。
- *
- * 车机上普通应用读不到 logcat，所以日志由应用落盘；这里直接显示内容，能复制或分享，
- * 不需要 adb，也不需要把车机连到电脑。
- */
-@Composable
-private fun DiagnosticSettingsSection() {
-    var open by remember { mutableStateOf(false) }
-    SettingsGroup(stringResource(R.string.settings_group_diagnostic)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(stringResource(R.string.settings_log_open), style = UiType.rowTitle(LocalCompact.current), color = Palette.Text)
-                Text(
-                    stringResource(R.string.settings_log_summary),
-                    style = UiType.rowTitle(LocalCompact.current).copy(fontWeight = FontWeight.Normal),
-                    color = Palette.Muted,
-                )
-            }
-            ActionButton(stringResource(R.string.settings_log_open), onClick = { open = true })
-        }
-    }
-    if (open) DiagnosticLogDialog(onClose = { open = false })
+    DiagnosticsSettingsSection()
 }
 
 /** 顶栏：「设置」、一句生效说明、右上「返回」。 */

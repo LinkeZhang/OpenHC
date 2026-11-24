@@ -6,20 +6,19 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import androidx.core.content.ContextCompat
-import io.github.gcbond.openhc.startup.BootStartPolicy
-import io.github.gcbond.openhc.startup.BootStart
-import io.github.gcbond.openhc.OpenHcApp
 import io.github.gcbond.openhc.IdentityLoader
+import io.github.gcbond.openhc.OpenHcApp
 import io.github.gcbond.openhc.audio.AudioOutput
 import io.github.gcbond.openhc.connection.BluetoothAddressPolicy
 import io.github.gcbond.openhc.connection.BluetoothSource
+import io.github.gcbond.openhc.connection.CarHome
 import io.github.gcbond.openhc.connection.DeviceInfo
 import io.github.gcbond.openhc.connection.DisplayPlan
 import io.github.gcbond.openhc.connection.VideoClarity
@@ -30,9 +29,9 @@ import io.github.gcbond.openhc.core.hisight.AccessUnitSink
 import io.github.gcbond.openhc.core.hisight.HiSightInput
 import io.github.gcbond.openhc.core.nearby.BleAdvertisement
 import io.github.gcbond.openhc.core.session.SessionEvent
-import io.github.gcbond.openhc.core.session.SessionLayer
 import io.github.gcbond.openhc.core.session.SocketRunner
 import io.github.gcbond.openhc.core.session.VideoParameters
+import io.github.gcbond.openhc.core.session.WirelessEndReason
 import io.github.gcbond.openhc.core.session.WirelessEvent
 import io.github.gcbond.openhc.core.session.WirelessReceiverConfig
 import io.github.gcbond.openhc.core.session.WirelessReceiverSession
@@ -42,28 +41,33 @@ import io.github.gcbond.openhc.platform.bluetooth.BleBeacon
 import io.github.gcbond.openhc.platform.bluetooth.BluetoothStatus
 import io.github.gcbond.openhc.platform.bluetooth.RfcommClient
 import io.github.gcbond.openhc.platform.bluetooth.RfcommServer
+import io.github.gcbond.openhc.platform.log.Log
 import io.github.gcbond.openhc.platform.media.VideoDecoder
+import io.github.gcbond.openhc.platform.wifi.CarHotspot
+import io.github.gcbond.openhc.platform.wifi.CarHotspotSettings
 import io.github.gcbond.openhc.platform.wifi.LocalHotspotOwner
 import io.github.gcbond.openhc.platform.wifi.MacText
+import io.github.gcbond.openhc.platform.wifi.WifiDirectGroupOwner
 import io.github.gcbond.openhc.platform.wifi.WifiStatus
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
 import io.github.gcbond.openhc.settings.ClarityPreferences
-import io.github.gcbond.openhc.settings.DiagnosticLog
 import io.github.gcbond.openhc.settings.MediaKeyPreferences
 import io.github.gcbond.openhc.settings.WirelessNetworkPreferences
 import io.github.gcbond.openhc.settings.WirelessPreferences
+import io.github.gcbond.openhc.startup.BootStart
+import io.github.gcbond.openhc.startup.BootStartPolicy
 import io.github.gcbond.openhc.trust.FileTrustStore
 import io.github.gcbond.openhc.trust.TrustStoreCorruptException
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import java.io.File
 import java.io.IOException
 import java.security.SecureRandom
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * 无线投屏（扫码 → 蓝牙 → 车机开热点 → 投屏）的总调度。进程内唯一（应用对象持有），有连接期间由前台服务
@@ -109,6 +113,11 @@ class WirelessController(
     private val stopWiredWaiting: () -> Unit = {},
     /** 让有线回到等插线（为无线让路之后，无线没拨成或连接结束时）。 */
     private val resumeWiredWaiting: () -> Unit = {},
+    /**
+     * 车机上插着能走有线的手机。插线会拉起有线，但有线的开始请求生效前有一小段时间状态还没变（[wiredActive] 为假），
+     * 自动拨手机看这一项，免得和刚开始的有线同时进行。
+     */
+    private val phoneOnCable: () -> Boolean = { false },
 ) {
 
     /** 前台服务监听：要不要留在前台、通知内容要不要更新。在主线程上回调。 */
@@ -221,11 +230,26 @@ class WirelessController(
 
     // ---------------------------------------------------------------- 对外操作（任意线程）
 
-    /** 「开始无线连接」（扫码）。运行时权限由界面先申请好（见 [WirelessStartFlow]）。 */
+    /**
+     * 「开始无线连接」：亮二维码等扫码；最近连成功的那台手机蓝牙正连着车机时，同时由车机去拨它，谁先连上走谁
+     * （手机自己回连在断开后一段时间内不会来，车机拨号不受这个限制）。运行时权限由界面先申请好（见 [WirelessStartFlow]）。
+     */
     fun start() = post {
         if (attempt != null) return@post
         cancelAutoRetry()
-        begin(Kind.MANUAL)
+        begin(Kind.MANUAL, dial = manualDialTarget())
+    }
+
+    /**
+     * 点「开始」时顺带拨的手机：最近连成功的那台、蓝牙正连着车机、读得到设备名才拨。是用户点的，不看「自动连接手机」开关、
+     * 冷却和「一次蓝牙连接只拨一次」。
+     */
+    private fun manualDialTarget(): ReconnectTarget? {
+        val last = wirelessPrefs.lastPhone ?: return null
+        val adapter = BluetoothStatus.adapter(app) ?: return null
+        if (phoneConnected(adapter, last) != true) return null
+        val name = phoneName(adapter, last) ?: return null
+        return ReconnectTarget(last, name)
     }
 
     /** 「停止」：按顺序收尾。之后这次蓝牙连接里不再自动拨（手机蓝牙重新连上车机时再拨）。 */
@@ -415,7 +439,13 @@ class WirelessController(
     /**
      * 开一次连接。[kind] 是 [Kind.AUTO]（自动进入的等待）时开始不了只记日志、界面上一行说明（[AutoHold]），不报错。
      */
-    private fun begin(kind: Kind, bluetoothTrigger: String? = null, reconnect: ReconnectTarget? = null, resumeWiredAfter: Boolean = false) {
+    private fun begin(
+        kind: Kind,
+        bluetoothTrigger: String? = null,
+        reconnect: ReconnectTarget? = null,
+        resumeWiredAfter: Boolean = false,
+        dial: ReconnectTarget? = null,
+    ) {
         if (attempt != null) return
         userStopped = false
         if (wirelessPrefs.wiredOnly) return blocked(kind, WirelessNotice.WiredOnly, AutoHold.WIRED_ONLY)
@@ -431,18 +461,18 @@ class WirelessController(
                 return blocked(kind, WirelessNotice.IdentityInvalid(loaded.reason), AutoHold.IDENTITY_MISSING)
         }
         // 二维码、握手、认证里的车机身份都由它推出，必须是真实地址：读不到就只能让车主填。
-        val systemAddress = DeviceInfo.systemBluetoothAddress(app)
+        val systemAddress = DeviceInfo.systemBluetoothAddress()
         val bluetooth = BluetoothAddressPolicy.chooseForWireless(systemAddress, settings.manualBluetoothAddress)
         val address = bluetooth.address
             ?: return blocked(kind, WirelessNotice.BluetoothAddressMissing, AutoHold.BLUETOOTH_ADDRESS_MISSING)
-        // 手填的优先（车主照着「关于本机」填的一定是真的），系统读到的只在没填时兜底。两者不一致时记一笔：
-        // 说明系统里读到的那个值是错的，排查时有用。
-        if (bluetooth.source == BluetoothSource.MANUAL && systemAddress != null && systemAddress != address) {
-            Log.i(TAG, "手填的蓝牙地址和系统里读到的不一致，按手填的来（系统读到的是 $systemAddress）")
+        // 无线用系统里读到的真实地址；手填的只在读不到时用。手填的像编出来的地址时，界面提醒一句。
+        val manual = BluetoothAddressPolicy.normalize(settings.manualBluetoothAddress)
+        if (bluetooth.source == BluetoothSource.SYSTEM_PROPERTY && manual != null && manual != address) {
+            Log.i(TAG, "手填的蓝牙地址和系统里读到的不同：无线用系统里的真实地址，手填的只用于有线")
         }
         val addressMismatch = bluetooth.source == BluetoothSource.MANUAL && BluetoothAddressPolicy.isLocallyAdministered(address)
         if (addressMismatch) {
-            Log.w(TAG, "用的是手填的蓝牙地址；它像是编出来的地址，不是车机真实地址时扫码后不会有反应")
+            Log.w(TAG, "读不到系统里的蓝牙地址，用的是手填的；它像是编出来的地址，不是车机真实地址时扫码后不会有反应")
         }
         val adapter = BluetoothStatus.adapter(app)
             ?: return blocked(kind, WirelessNotice.BluetoothUnsupported, AutoHold.BLUETOOTH_OFF)
@@ -470,6 +500,7 @@ class WirelessController(
                 io.github.gcbond.openhc.connection.DisplayArea.screenFor(app, fullScreen),
                 io.github.gcbond.openhc.connection.ResolutionChoice.Auto,
                 settings.fps,
+                settings.uiScalePercent,
             )
         } catch (e: IllegalArgumentException) {
             return blocked(kind, WirelessNotice.StartFailed("屏幕参数不对：${e.message}"), AutoHold.START_FAILED)
@@ -501,26 +532,39 @@ class WirelessController(
             return blocked(kind, WirelessNotice.StartFailed(FOREGROUND_FAILED), AutoHold.FOREGROUND_UNAVAILABLE)
         }
 
+        val carHotspot = wirelessPrefs.carHotspotSettings()
+        if (wirelessPrefs.carHotspot && carHotspot == null) {
+            return blocked(kind, WirelessNotice.StartFailed(CAR_HOTSPOT_MISSING), AutoHold.START_FAILED)
+        }
         cancelAutoRetry()
-        val current = Attempt(++attemptCounter, kind, config, adapter, identity.host, beacon, bluetoothTrigger, reconnect, resumeWiredAfter)
+        val directGroup = carHotspot == null && wirelessPrefs.usesWifiDirect
+        val current = Attempt(
+            ++attemptCounter, kind, config, adapter, identity.host, beacon, bluetoothTrigger, reconnect, resumeWiredAfter, directGroup,
+            carHotspot, dial,
+        )
         attempt = current
-        if (reconnect != null) triggers.commitDial(reconnect.address, SystemClock.elapsedRealtime())
+        // 点「开始」顺带拨的也记进拨号规则：自动拨号不再叠着拨这台手机。
+        (reconnect ?: dial)?.let { triggers.commitDial(it.address, SystemClock.elapsedRealtime()) }
         inputTarget = current
-        DiagnosticLog.log(
+        Log.i(
             TAG,
             "第 ${current.id} 次无线连接（${when (kind) { Kind.AUTO -> "等已配对的手机回连"; Kind.RECONNECT -> "车机主动回连"; Kind.MANUAL -> "用户开始" }}）：" +
                 "蓝牙地址来源 ${bluetooth.source}，deviceId ${config.deviceId.take(4)}…，" +
-                "画布 ${display.width}x${display.height}@${display.fps} dpi ${display.dpi}，系统 ${Build.VERSION.SDK_INT}，$wifi，" +
-                "已配对手机 ${trustStore.peerCount} 台，声音 ${audio ?: "关"}，" +
-                "广播 ${beacon?.let { "开（重新发布 ${it.republishMillis / 1000} 秒，GATT ${if (it.gatt) "开" else "关"}${if (it.declareRandomAddress) "，声明随机地址" else ""}）" } ?: "不发"}",
+                "画布 ${display.width}x${display.height}@${display.fps} dpi ${display.dpi}（界面大小 ${settings.uiScalePercent}%），系统 ${Build.VERSION.SDK_INT}，$wifi，" +
+                "已配对手机 ${trustStore.peerCount} 台，声音 ${audio ?: "关"}，手机加入的网络 ${when { carHotspot != null -> "车机自带热点（试验，$carHotspot）"; directGroup -> "WiFi 直连组（试验）"; else -> "本地热点" }}，" +
+                "广播 ${beacon?.let { "开（重新发布 ${it.republishMillis / 1000} 秒，GATT ${if (it.gatt) "开" else "关"}${if (it.declareRandomAddress) "，声明随机地址" else ""}）" } ?: "不发"}" +
+                (dial?.let { "，同时车机拨手机（${MacText.mask(it.address)}）" } ?: ""),
         )
-        DiagnosticLog.log(TAG, "第 ${current.id} 次无线连接的清晰度：${clarity.key}，声明码率 ${VideoClarity.describe(config.display.bitrate)}")
+        Log.i(TAG, "第 ${current.id} 次无线连接的清晰度：${clarity.key}，声明码率 ${VideoClarity.describe(config.display.bitrate)}")
         setAutoHold(null)
         apply(
             WirelessSignal.AttemptStarted(
                 current.id,
                 addressMismatch,
                 autoReconnect = kind == Kind.AUTO,
+                direct = directGroup,
+                // 二维码里用的地址要显示在界面上：手机就是拿它去连车机的，地址错了手机永远连不上，
+                // 而车机这边只会一直停在「等扫码」、不报任何错。
                 bluetoothAddress = address,
                 bluetoothSource = bluetooth.source,
             ),
@@ -529,7 +573,8 @@ class WirelessController(
         watchTermination(current)
     }
 
-    private fun granted(permission: String) = WirelessPermissionCheck.granted(app, permission)
+    private fun granted(permission: String) =
+        ContextCompat.checkSelfPermission(app, permission) == PackageManager.PERMISSION_GRANTED
 
     /** 开始不了：回到空闲，显示原因。 */
     private fun block(notice: WirelessNotice) {
@@ -669,6 +714,10 @@ class WirelessController(
             }
             return
         }
+        if (phoneOnCable()) {
+            Log.i(TAG, "手机插着数据线，有线优先，不拨手机（$why）")
+            return giveUp()
+        }
         val adapter = BluetoothStatus.adapter(app)
         val name = adapter?.let { phoneName(it, address) }
         if (name == null) {
@@ -766,7 +815,7 @@ class WirelessController(
     private fun reconnectConditions(forDial: Boolean = false): ReconnectPolicy.Conditions {
         val adapter = BluetoothStatus.adapter(app)
         val sdk = Build.VERSION.SDK_INT
-        val address = BluetoothAddressPolicy.chooseForWireless(DeviceInfo.systemBluetoothAddress(app), settings.manualBluetoothAddress).address
+        val address = BluetoothAddressPolicy.chooseForWireless(DeviceInfo.systemBluetoothAddress(), settings.manualBluetoothAddress).address
         return ReconnectPolicy.Conditions(
             enabled = forDial || wirelessPrefs.connectOnBluetooth,
             wiredOnly = wirelessPrefs.wiredOnly,
@@ -863,6 +912,12 @@ class WirelessController(
         reconnect: ReconnectTarget?,
         /** 有线是为这次让出来的：结束后让有线回到等插线。 */
         val resumeWiredAfter: Boolean = false,
+        /** 这次不开本地热点，改建 WiFi 直连组（设置里「无线方式」选了直连）。 */
+        val directGroup: Boolean = false,
+        /** 这次不开本地热点，用车主已经打开的车机自带热点（设置里「无线方式」选了车机自带热点）。 */
+        val carHotspot: CarHotspotSettings? = null,
+        /** 扫码等待时同时由车机去拨的手机（[Kind.MANUAL] 点「开始」时），其他为 null。 */
+        val dial: ReconnectTarget? = null,
     ) {
         /** 投屏开始过。 */
         var projected = false
@@ -885,6 +940,7 @@ class WirelessController(
          */
         val audio: AudioOutput = AudioOutput(
             app, AUDIO_ID_BASE + id,
+            wireless = true,
             mediaFocusChanged = { held -> MediaKeys.mediaFocus(keys, held) },
         ) { change -> runner.submit { bridge.sendAudioFocus(change) } }
         val session: WirelessReceiverSession = WirelessReceiverSession(config, sink, audio)
@@ -898,8 +954,21 @@ class WirelessController(
             },
             // 会话在手机认证通过后才要热点；无线开着时热点已经先开好留着，这里直接接手。之前排的「恢复车机 WiFi」作废。
             startHotspot = { events ->
-                wifiRestore.onHotspotRequested()
-                LocalHotspotOwner.get(app).create(events) { Log.i(TAG, "[$id] 热点：$it") }
+                val car = carHotspot
+                if (car != null) {
+                    // 车机自带热点是车主开的：不开本地热点，也不排「恢复车机 WiFi」。
+                    CarHotspot(app, car, events) { Log.i(TAG, "[$id] 车机热点：$it") }
+                } else {
+                    // 收尾已经开始（停止之前排着的认证通过才走到这里）：别把收尾马上要排的复查取消掉。
+                    if (!tearingDown) wifiRestore.onHotspotRequested()
+                    LocalHotspotOwner.get(app).create(events) { Log.i(TAG, "[$id] 热点：$it") }
+                }
+            },
+            // 直连：不开热点、不动车机自己的 WiFi，所以也不排「恢复车机 WiFi」。
+            startDirect = if (directGroup) {
+                { events -> WifiDirectGroupOwner(app, events) { Log.i(TAG, "[$id] 直连：$it") } }
+            } else {
+                null
             },
             results = results,
             onEvent = { event -> onWirelessEvent(this, event) },
@@ -907,7 +976,9 @@ class WirelessController(
         )
         val bridge: WirelessRunnerBridge = WirelessRunnerBridge(
             session,
-            reconnect?.let { target -> { now: Long -> session.startReconnect(target.address, target.name, now) } } ?: session::start,
+            reconnect?.let { target -> { now: Long -> session.startReconnect(target.address, target.name, now) } }
+                ?: dial?.let { target -> { now: Long -> session.startWithDial(target.address, target.name, now) } }
+                ?: session::start,
         ) { output -> executor.execute(output) }
         val runner: SocketRunner = SocketRunner(
             bridge,
@@ -939,9 +1010,13 @@ class WirelessController(
             )
         }
 
-        /** 协议线程建、调度线程收尾时关。 */
+        /**
+         * 协议线程建、调度线程收尾时关，两边都在 [decoderLock] 里改。收尾在关执行器之前就置了 [tearingDown]：
+         * 执行器关闭超时、强行放弃时协议线程可能还在建解码器，靠这把锁保证建了的一定被收尾关掉，收尾之后不再建。
+         */
         @Volatile
         var videoDecoder: VideoDecoder? = null
+        val decoderLock = Any()
 
         @Volatile
         var inputReady = false
@@ -965,16 +1040,7 @@ class WirelessController(
 
     /** 会话事件（TCP 段与认证），在协议线程上。 */
     private fun onProtocolEvent(current: Attempt, event: SessionEvent) {
-        if (event is SessionEvent.Diagnostic) {
-            Log.d(TAG, "[${current.id}] $event")
-            // DMSDP 层的诊断（手机回了什么、没认出来的消息、SETUP 应答原文）必须落盘：
-            // 车机读不到 logcat，只有写进诊断文件用户才能发出来。其它层的诊断量大、多为过程噪声，
-            // 仍旧只进 logcat。
-            if (event.layer == SessionLayer.DMSDP) DiagnosticLog.log(TAG, "[${current.id}] $event")
-        } else {
-            Log.i(TAG, "[${current.id}] $event")
-            DiagnosticLog.log(TAG, "[${current.id}] $event")
-        }
+        if (event is SessionEvent.Diagnostic) Log.d(TAG, "[${current.id}] $event") else Log.i(TAG, "[${current.id}] $event")
         // 在协议线程上同步建好解码器：之后的帧也在这个线程上送，保证第一帧到时解码器已经接上。
         if (event is SessionEvent.VideoNegotiated) prepareDecoder(current, event.video)
         post { onSessionEvent(current, event) }
@@ -983,7 +1049,6 @@ class WirelessController(
     /** 无线事件，在协议线程上（经执行器转来）。 */
     private fun onWirelessEvent(current: Attempt, event: WirelessEvent) {
         Log.i(TAG, "[${current.id}] $event")
-        DiagnosticLog.log(TAG, "[${current.id}] $event")
         // 结束原因按发生的先后记，不等调度线程排到。
         if (event is WirelessEvent.Ended) current.causes.onSessionEnded(event.reason)
         post {
@@ -1034,19 +1099,21 @@ class WirelessController(
                 current.inputReady = current.touchNegotiated && !current.tearingDown
                 if (current.keyNegotiated && !current.tearingDown) MediaKeys.ready(app, current.keys)
             }
+            is SessionEvent.DeviceSessionReady -> CarHome.onDeviceSessionReady()
+            SessionEvent.ProjectionPaused -> CarHome.onProjectionPaused("无线 #${current.id}")
             else -> Unit
         }
     }
 
     private fun prepareDecoder(current: Attempt, video: VideoParameters) {
-        val decoder = current.videoDecoder ?: VideoDecoder(DecoderListener(current.id)).also {
-            current.videoDecoder = it
-            current.sink.target = it
-            mutableDecoder.value = it
+        val decoder = synchronized(current.decoderLock) {
+            if (current.tearingDown) return
+            current.videoDecoder ?: VideoDecoder(DecoderListener(current.id)).also {
+                current.videoDecoder = it
+                current.sink.target = it
+                mutableDecoder.value = it
+            }
         }
-        // 有视频流了：让音频改用薄缓冲。视频解码到上屏只要 13ms，音频厚缓冲却要 1000ms，
-        // 差一秒就是音画不同步（实测安卓 9 车机播视频时很明显）。
-        current.audio.onVideoActive(true)
         decoder.prepare(video.width, video.height, video.fps)
     }
 
@@ -1098,12 +1165,14 @@ class WirelessController(
         current.beacon?.stop("连接收尾")
         // 1. 协议层：会话按顺序收尾（TEARDOWN、关蓝牙、拆 WiFi 网络）；已经结束时立即返回，否则最多阻塞几秒。
         current.runner.close()
-        // 2. 声音、解码器：执行器已经停了，不会再有回调。
+        // 2. 声音、解码器：执行器停了就不会再有回调；关闭超时、强行放弃时协议线程可能还在建解码器，见 [Attempt.decoderLock]。
         current.audio.close()
-        current.sink.target = null
-        current.videoDecoder?.close()
-        current.videoDecoder = null
-        mutableDecoder.value = null
+        val decoder = synchronized(current.decoderLock) {
+            current.sink.target = null
+            mutableDecoder.value = null
+            current.videoDecoder.also { current.videoDecoder = null }
+        }
+        decoder?.close()
         // 3. 平台资源兜底：正常收尾时会话已经逐个关过，这里什么都不剩；执行器意外退出时靠这一步撤掉服务记录、拆 WiFi 网络。
         current.executor.closeAll()
         maybeFinish(current)
@@ -1138,6 +1207,15 @@ class WirelessController(
             setAutoHold(AutoHold.FOREGROUND_UNAVAILABLE)
             releaseForeground()
             return
+        }
+        // 点「开始」时车机拨通了手机、手机却没跟着连（没确认、要输码……）：再亮一次二维码等扫码，这次不拨，不会来回重复。
+        val reason = (current.causes.result() as? WirelessEndCause.Session)?.reason
+        if (current.dial != null && current.stopReason == null && !current.projected && reason is WirelessEndReason.ReconnectFailed &&
+            !wirelessPrefs.wiredOnly && !wiredActive()
+        ) {
+            Log.i(TAG, "车机拨通了手机但没连成（$reason），改为只等扫码")
+            begin(Kind.MANUAL)
+            if (attempt != null) return
         }
         refreshIdleStatus("上一次连接结束")
     }
@@ -1197,7 +1275,10 @@ class WirelessController(
     private fun syncHotspotStandby() {
         val current = attempt
         // 车机主动回连要等车机连上手机的蓝牙控制通道才开：手机不在旁边时不顶掉车机自己的 WiFi。
-        val wanted = current != null && (current.kind != Kind.RECONNECT || current.phoneSeen) &&
+        // 建直连组的连接不开热点（开热点会停掉车机 WiFi，组就建不起来了）。
+        // 用车机自带热点的连接也不开：开本地热点会把车主开的热点挤掉。
+        val wanted = current != null && !current.directGroup && current.carHotspot == null &&
+            (current.kind != Kind.RECONNECT || current.phoneSeen) &&
             !wirelessPrefs.wiredOnly && !wiredActive()
         if (wanted == hotspotStandby) return
         hotspotStandby = wanted
@@ -1216,6 +1297,9 @@ class WirelessController(
     }
 
     private companion object {
+        /** 选了车机自带热点却没填名称密码。 */
+        const val CAR_HOTSPOT_MISSING = "无线方式选了「车机自带热点」，但还没在设置里填热点名和密码"
+
         /** 同一台手机两次车机主动回连之间至少隔这么久。 */
         const val RECONNECT_COOLDOWN_MS = 60_000L
 

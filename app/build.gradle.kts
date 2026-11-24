@@ -45,11 +45,11 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         // versionCode = 主版本 × 10000 + 次版本 × 100 + 补丁号。
-        // 这个分支是「上游 0.2.0 + 鸿蒙 4.2 音频修复 + 低版本车机适配」的衍生版：
-        // 加 50 跟上游 0.2.0（200）区分开，装到车机上时一眼能看出跑的是哪个包。
-        // 251 → 252：修 251 上「鸿蒙 4.2 投屏正常但没声音」（音频私有帧头判据写错，见 PrivateAudioFrames）。
-        versionCode = 259
-        versionName = "harmony4.2-NEXT-0.2.0"
+        // 这个分支是「上游 0.2.7 + 低版本车机适配（安卓 6、7 的热点）+ 诊断日志导出增强」的衍生版：
+        // 加 100 跟上游 0.2.7（207）区分开，装到车机上时一眼能看出跑的是哪个包。
+        // 307 起：合并上游 0.2.7（声音、协议解析、热点全换上游新版），此前 main 是 259、android4 分支是 286。
+        versionCode = 307
+        versionName = "0.2.7-harmony42"
     }
 
     sourceSets {

@@ -92,7 +92,7 @@ sealed class WirelessNotice {
         override fun toString() = "BluetoothOff"
     }
 
-    /** 车机系统是安卓 5.0 以下，没有可用的开热点接口：用不了无线连接。 */
+    /** 车机系统没有可用的开热点接口（旧接口反射不到、也不到本地热点）：用不了无线连接。 */
     object HotspotUnsupported : WirelessNotice() {
         override fun toString() = "HotspotUnsupported"
     }
@@ -131,8 +131,8 @@ sealed class WirelessNotice {
 
     data class StartFailed(val reason: String) : WirelessNotice()
 
-    /** 上一次无线连接结束的原因。 */
-    data class Ended(val cause: WirelessEndCause) : WirelessNotice()
+    /** 上一次无线连接结束的原因；[direct]：那次手机加入的是 WiFi 直连组（WiFi 那几步失败时说法不同）。 */
+    data class Ended(val cause: WirelessEndCause, val direct: Boolean = false) : WirelessNotice()
 }
 
 /** 状态归并的输入。 */
@@ -145,6 +145,8 @@ sealed class WirelessSignal {
         val attempt: Int,
         val addressMismatch: Boolean = false,
         val autoReconnect: Boolean = false,
+        /** 这次手机加入的是车机建的 WiFi 直连组，不是热点（设置里「无线方式」选了直连）。 */
+        val direct: Boolean = false,
         /** 这次二维码里用的车机蓝牙地址，以及它是手填的还是系统读到的。 */
         val bluetoothAddress: String? = null,
         val bluetoothSource: BluetoothSource? = null,
@@ -208,6 +210,8 @@ data class WirelessUiState(
     val autoHold: AutoHold? = null,
     /** 这次连接里手机经蓝牙连上过。 */
     val phoneConnected: Boolean = false,
+    /** 这次连接手机加入的是车机建的 WiFi 直连组（不是热点）：WiFi 那几步的说法跟着变。只在连接进行中有意义。 */
+    val direct: Boolean = false,
 ) {
     /** 回控已就绪且手机接受触摸。 */
     val inputReady: Boolean get() = projection.inputReady
@@ -222,7 +226,7 @@ data class WirelessUiState(
     override fun toString(): String =
         "WirelessUiState(phase=$phase, step=$step, attempt=$attempt, active=$active, notice=$notice, " +
             "二维码=${if (qrCode != null) "有" else "无"}, 连接码=${if (pinCode != null) "有" else "无"}, 投屏=${projection.phase}, " +
-            "自动回连=$autoReconnect, 广播=$beacon, 不等的原因=$autoHold)"
+            "自动回连=$autoReconnect, 直连=$direct, 广播=$beacon, 不等的原因=$autoHold)"
 }
 
 /** 状态归并：纯函数。 */
@@ -243,6 +247,7 @@ object WirelessReducer {
             bluetoothSource = signal.bluetoothSource,
             projection = ConnectionReducer.reduce(ConnectionUiState(), ConnectionSignal.AttemptStarted(signal.attempt)),
             autoReconnect = signal.autoReconnect,
+            direct = signal.direct,
             // 自动回到等待时留着上一次的结束原因，看得出刚才为什么断了。
             notice = if (signal.autoReconnect) state.notice else null,
         )
@@ -268,7 +273,7 @@ object WirelessReducer {
         }
 
         is WirelessSignal.AttemptFinished -> WirelessUiState(
-            notice = if (signal.cause is WirelessEndCause.UserStop) null else WirelessNotice.Ended(signal.cause),
+            notice = if (signal.cause is WirelessEndCause.UserStop) null else WirelessNotice.Ended(signal.cause, state.direct),
             attempt = state.attempt,
             autoHold = state.autoHold,
         )

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 设置 → 诊断 -->
+    <string name="settings_group_diagnostics">诊断</string>
+    <string name="settings_diag_export">导出诊断日志</string>
+    <string name="settings_diag_export_hint">把 OpenHC 最近的运行记录存成一个文本文件（安卓 10 起在「下载/OpenHC」文件夹），报告问题时附上。只有 OpenHC 自己的日志：不含连接密钥和 WiFi 密码，手机、车机的地址只留首尾几位。</string>
+    <string name="settings_diag_export_button">导出</string>
+    <string name="settings_diag_exporting">正在导出…</string>
+    <string name="settings_diag_saved">已保存：%1$s。报告问题时把这个文件附上（可以用车机的文件管理拷到 U 盘再上传）。</string>
+    <string name="settings_diag_failed">没导出来：%1$s</string>
+
+    <!-- 另存到指定目录、分享：车机的「下载」里找不到文件、或者想直接发出去时用 -->
+    <string name="settings_diag_save_as">另存到指定目录</string>
+    <string name="settings_diag_save_as_hint">自己挑存到哪儿：插了 U 盘可以选 U 盘，车机的「下载」里看不到文件时也能用。</string>
+    <string name="settings_diag_share">分享</string>
+    <string name="settings_diag_share_hint">直接发给别人：车机上有微信、邮箱或蓝牙就能发出去，不用先存文件。</string>
+    <string name="log_share">分享</string>
+    <string name="log_share_failed">没有可用来分享的应用</string>
+    <string name="log_share_subject">OpenHC 诊断日志</string>
+    <string name="log_export_done">已导出到 %1$s</string>
+    <string name="log_export_cancelled">没有选保存位置，日志没导出</string>
+    <string name="log_export_empty">日志还是空的，没有可导出的内容</string>
+    <string name="log_export_failed">导出失败：%1$s</string>
+</resources>

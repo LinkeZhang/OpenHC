@@ -168,5 +168,20 @@
                 <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
             </intent-filter>
         </receiver>
+
+        <!--
+            「分享」诊断日志时把缓存里的副本授权给接收方（微信、蓝牙、邮件）。
+            只开放 cacheDir/logs 这一个子目录，不暴露私有目录里的连接参数、信任库等文件。
+            authorities 要和 LogExport.authority() 一致。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.logfiles"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
