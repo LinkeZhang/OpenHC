@@ -48,9 +48,9 @@ android {
         //
         // versionCode 用独立的 4xxxx 段：安卓 4 分支和主线装在同一台车机上时（同一个 applicationId），
         // 号段分开才能互相覆盖安装、不用先卸载。4 开头 = 安卓 4 分支，后面跟「主版本 × 100 + 次版本 × 10 + 补丁」，
-        // 所以 0.2.7 是 40207。主线继续在 3xx 段递增，两条线互不干扰。
-        versionCode = 40207
-        versionName = "0.2.7-android4"
+        // 所以 0.2.7 是 40207；0.2.8 是 40208。主线继续在 3xx 段递增，两条线互不干扰。
+        versionCode = 40208
+        versionName = "0.2.8-android4"
         // 方法数超过 64K，安卓 4.x 要用 MultiDex 分包（5.0 起系统自带）。
         multiDexEnabled = true
     }

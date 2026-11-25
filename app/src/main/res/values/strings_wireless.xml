@@ -30,6 +30,7 @@
     <string name="wireless_hint_bt_handshake">手机已经通过蓝牙连上，正在握手…</string>
     <string name="wireless_hint_waiting_auth">握手完成，等待手机发起认证…</string>
     <string name="wireless_hint_auth_pairing">第一次连接这台车机，正在配对…</string>
+    <string name="wireless_hint_enter_pin_on_phone">手机要求配对：请在手机上输入下面的 6 位连接码。</string>
     <string name="wireless_hint_auth_trusted">正在认证（免码回连）…</string>
     <string name="wireless_hint_confirm_on_phone">手机上弹出了确认框，请在手机上点「连接」。（手机开着热点时会这样问一次）</string>
     <string name="wireless_hint_wifi_handshake">手机已经从 WiFi 连上，正在握手…</string>

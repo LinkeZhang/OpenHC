@@ -126,6 +126,16 @@ sealed class WirelessEvent : WirelessOutput {
         override fun toString() = "PairingReady(内容不显示)"
     }
 
+    /**
+     * 车机主动回连时，手机不认这台车机、要求输码配对（第一次连这台车机，或手机里删过这台车机）：
+     * 把 6 位连接码 [pinCode] 显示在车机上，请车主在手机上输入。认证照常往下走，不再是一条死路。
+     *
+     * 扫码方向不出现这个事件：连接码早已和二维码一起显示（[PairingReady]），手机自己从二维码里带。
+     */
+    class PinCodeRequired(val pinCode: String) : WirelessEvent() {
+        override fun toString() = "PinCodeRequired(内容不显示)"
+    }
+
     /** 手机经蓝牙连上了车机（扫码或回连）。[address] 是手机的蓝牙地址。 */
     class PhoneBluetoothConnected(val address: String) : WirelessEvent() {
         override fun toString() = "PhoneBluetoothConnected(地址不显示)"

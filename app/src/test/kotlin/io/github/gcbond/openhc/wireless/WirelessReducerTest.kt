@@ -248,6 +248,30 @@ class WirelessReducerTest {
     }
 
     @Test
+    fun pinCodeRequiredShowsPinWithoutQrCode() {
+        // 车机主动回连：没有二维码，手机要求输码时把连接码显示出来，并说明要在手机上输入。
+        val state = run(
+            WirelessSignal.AttemptStarted(1, autoReconnect = true),
+            wireless(WirelessEvent.PhoneBluetoothConnected("02:66:77:88:99:AA")),
+            wireless(WirelessEvent.BluetoothHandshakeCompleted(encrypted = true)),
+            wireless(WirelessEvent.PinCodeRequired("135790")),
+        )
+        assertEquals(WirelessPhase.CONNECTING, state.phase)
+        assertEquals(WirelessStep.AUTH_PAIRING, state.step)
+        assertEquals("135790", state.pinCode)
+        assertTrue(state.awaitingPinEntry)
+        assertNull(state.qrCode)
+        // 认证通过后连接码和输码提示一起清掉。
+        val done = run(session(SessionEvent.AuthStarted(AuthMode.PIN_PAIRING)), from = state)
+        assertTrue(done.awaitingPinEntry)
+        val authed = run(session(SessionEvent.Authenticated(AuthMode.PIN_PAIRING)), from = done)
+        assertNull(authed.pinCode)
+        assertFalse(authed.awaitingPinEntry)
+        // 收尾也清掉，不在「正在断开」时还挂着码。
+        assertFalse(run(WirelessSignal.StopRequested, from = state).awaitingPinEntry)
+    }
+
+    @Test
     fun toStringHidesTheQrCodeAndPin() {
         val text = run(*untilScan).toString()
         assertFalse(text.contains("135790"))

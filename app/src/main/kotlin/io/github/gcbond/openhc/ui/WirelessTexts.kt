@@ -31,6 +31,8 @@ internal fun wirelessPhaseTitle(context: Context, state: WirelessUiState): Strin
 )
 
 internal fun wirelessHint(context: Context, state: WirelessUiState): String {
+    // 车机主动回连、手机要求输码：说清「在手机上输下面这个码」，比「正在配对…」有用。
+    if (state.awaitingPinEntry) return context.getString(R.string.wireless_hint_enter_pin_on_phone)
     state.step?.let { return context.getString(stepHint(context, it)) }
     return when (state.phase) {
         WirelessPhase.IDLE -> context.getString(R.string.wireless_hint_idle)

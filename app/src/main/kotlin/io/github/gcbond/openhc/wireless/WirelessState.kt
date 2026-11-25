@@ -182,6 +182,11 @@ data class WirelessUiState(
     /** 6 位连接码（和二维码里的是同一个）；认证成功或手机从 WiFi 连上后清掉。 */
     val pinCode: String? = null,
     /**
+     * 车机主动回连时手机要求输码配对：连接码要车主在手机上手动输入（没有二维码可扫）。
+     * 界面据此把连接码放大显示并给出输入说明。
+     */
+    val awaitingPinEntry: Boolean = false,
+    /**
      * 投屏段的状态，由有线的 [ConnectionReducer] 归并（WiFi 段与有线完全相同）：投屏页直接用它
      * （画面尺寸、第一帧、解码器问题、回控是否就绪）。
      */
@@ -286,9 +291,12 @@ object WirelessReducer {
         return when (event) {
             is WirelessEvent.PairingReady ->
                 state.copy(phase = WirelessPhase.WAITING_FOR_SCAN, step = null, qrCode = event.qrCode, pinCode = event.pinCode)
+            is WirelessEvent.PinCodeRequired ->
+                // 车机主动回连时手机要求输码：没有二维码，连接码直接显示在屏幕上，请车主在手机上输入。
+                connecting(state, WirelessStep.AUTH_PAIRING).copy(pinCode = event.pinCode, awaitingPinEntry = true)
             // 手机连上了，二维码没用了；连接码留着，手机万一要求手输时还看得到。
             is WirelessEvent.PhoneBluetoothConnected ->
-                connecting(state, WirelessStep.BLUETOOTH_HANDSHAKE).copy(qrCode = null, phoneConnected = true)
+                connecting(state, WirelessStep.BLUETOOTH_HANDSHAKE).copy(qrCode = null, phoneConnected = true, awaitingPinEntry = false)
             is WirelessEvent.BluetoothHandshakeCompleted -> connecting(state, WirelessStep.WAITING_AUTH)
             is WirelessEvent.ReconnectAwaitingPhone -> connecting(state, WirelessStep.CONFIRM_ON_PHONE)
             // 热点开好了才会回协商应答：协商完直接发网络信息。
@@ -313,8 +321,10 @@ object WirelessReducer {
                 next,
                 if (event.mode == AuthMode.PIN_PAIRING) WirelessStep.AUTH_PAIRING else WirelessStep.AUTH_TRUSTED,
             )
-            is SessionEvent.Authenticated -> connecting(next, WirelessStep.NEGOTIATING_WIFI).copy(qrCode = null, pinCode = null)
-            is SessionEvent.PhoneConnected -> connecting(next, WirelessStep.WIFI_HANDSHAKE).copy(qrCode = null, pinCode = null)
+            is SessionEvent.Authenticated -> connecting(next, WirelessStep.NEGOTIATING_WIFI)
+                .copy(qrCode = null, pinCode = null, awaitingPinEntry = false)
+            is SessionEvent.PhoneConnected -> connecting(next, WirelessStep.WIFI_HANDSHAKE)
+                .copy(qrCode = null, pinCode = null, awaitingPinEntry = false)
             // WiFi 控制通道上握手完，认证早已在蓝牙上做完，手机接着就要设备会话。
             is SessionEvent.ControlHandshakeCompleted -> connecting(next, WirelessStep.DEVICE_SESSION)
             is SessionEvent.DeviceSessionReady -> connecting(next, WirelessStep.WAITING_PROJECTION)
@@ -342,6 +352,7 @@ object WirelessReducer {
         step = null,
         qrCode = null,
         pinCode = null,
+        awaitingPinEntry = false,
         projection = ConnectionReducer.reduce(state.projection, ConnectionSignal.StopRequested),
     )
 }

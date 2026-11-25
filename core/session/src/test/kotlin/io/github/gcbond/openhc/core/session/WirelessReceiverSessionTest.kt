@@ -888,13 +888,34 @@ class WirelessReceiverSessionTest {
     }
 
     @Test
-    fun reconnectNeedingPinEndsAndAsksForPairing() {
+    fun reconnectNeedingPinShowsPinCodeAndKeepsAuthenticating() {
+        val d = Driver()
+        d.reconnectToAuthChannel()
+        // 手机不认这台车机、要求输码：不停，把连接码显示在车机上，认证继续。
+        assertEquals(
+            listOf("rfcomm-write BLUETOOTH_AUTH hello-reply", "event PinCodeRequired(内容不显示)", "diag", "event AuthStarted(PIN_PAIRING)"),
+            d.btData(WirelessChannel.BLUETOOTH_AUTH, "hello"),
+        )
+        val shown = assertIs<WirelessEvent.PinCodeRequired>(d.outputs.filterIsInstance<WirelessEvent.PinCodeRequired>().single())
+        assertEquals(WirelessSynthetic.PIN, shown.pinCode)
+        assertTrue(d.outputs.none { it is WirelessEvent.Ended })
+        // 车主在手机上输了码：认证通过，照常开热点、走后面的流程。
+        assertEquals(
+            listOf("rfcomm-write BLUETOOTH_AUTH done-reply", "event Authenticated(PIN_PAIRING)", "wifi-start"),
+            d.btData(WirelessChannel.BLUETOOTH_AUTH, "done"),
+        )
+        assertTrue(d.outputs.none { it is WirelessEvent.Ended })
+    }
+
+    @Test
+    fun reconnectPinCodeShownOnlyOnceWhenPhoneResendsHandshake() {
         val d = Driver()
         d.reconnectToAuthChannel()
         d.btData(WirelessChannel.BLUETOOTH_AUTH, "hello")
-        val reason = assertIs<WirelessEndReason.ReconnectFailed>(d.ended())
-        assertTrue(reason.needsPairing)
-        assertTrue(d.outputs.none { it is WirelessOutput.Common && it.output is SessionEvent.AuthStarted })
+        val count = d.outputs.count { it is WirelessEvent.PinCodeRequired }
+        // 手机重发握手不再重复提示（连接码一直在屏幕上，重复提示只会闪）。
+        d.btData(WirelessChannel.BLUETOOTH_AUTH, "hello")
+        assertEquals(count, d.outputs.count { it is WirelessEvent.PinCodeRequired })
     }
 
     @Test

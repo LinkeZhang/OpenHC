@@ -39,6 +39,7 @@ import java.util.UUID
  * 车机主动回连（[startReconnect]，和 [start]、[startWithDial] 三选一）只换前 3 步：车机连手机的蓝牙控制服务（不开监听、不出二维码），
  * 车机当握手发起方；握手完成后车机请手机开认证子通道，手机同意后车机按它给的通道号连过去，手机在上面先发认证握手。
  * 认证之后（第 4 步起）与手机连上来时完全相同（2026-11-22 实车：认证后手机发的就是同一条数据通道协商）。
+ * 手机不认这台车机、要求输码时，主动回连方向把连接码显示在车机上（[WirelessEvent.PinCodeRequired]），由车主在手机上输入。
  *
  * 结束时（任何原因）：先让内嵌的有线编排器按它的顺序收尾，再关蓝牙认证子通道、蓝牙控制通道，关掉热点，
  * 最后输出 [WirelessEvent.Ended]。之后所有方法都返回空列表。
@@ -126,6 +127,9 @@ class WirelessReceiverSession internal constructor(
     /** 主动回连：手机暂时拒绝过、正在等手机上的确认。 */
     private var awaitingPhone = false
 
+    /** 主动回连：已经因为手机要求输码把连接码显示过一次了（手机重发握手不再重复提示）。 */
+    private var pinCodeShown = false
+
     /** 等认证子通道监听开好的请求。 */
     private val pendingAuthRequests = ArrayList<BluetoothOutput.SocketRequest>()
 
@@ -180,7 +184,8 @@ class WirelessReceiverSession internal constructor(
     /**
      * 车机主动回连：连手机 [phoneAddress] 的蓝牙控制服务，不开监听、不出二维码。只能调用一次（和 [start] 二选一）。
      * [phoneName] 是请手机开认证子通道时的业务标签（手机的设备名；实车只验证过和手机蓝牙名一致的情况）。
-     * 认证要输码（手机不认这台车了）就以 [WirelessEndReason.ReconnectFailed]（要重新配对）结束，因为这时没有二维码可显示。
+     * 认证要输码（手机不认这台车机了）时不停：发出 [WirelessEvent.PinCodeRequired] 把连接码显示在车机上，
+     * 请车主在手机上输入，认证照常往下走。这样在禁止第三方开 RFCOMM 服务端、扫码走不通的车机上也能连。
      */
     fun startReconnect(phoneAddress: String, phoneName: String, nowMillis: Long): List<WirelessOutput> {
         check(!started) { "start 只能调用一次" }
@@ -625,11 +630,16 @@ class WirelessReceiverSession internal constructor(
             if (ended) return
             when (a) {
                 is HiCarAuthAction.Send -> write(authConn, a.bytes, out)
-                // 连接码早已和二维码一起显示，这里不再单独给。主动回连时没有二维码：要输码就结束，请用户重新扫码。
                 is HiCarAuthAction.HandshakeAnswered -> {
+                    // 扫码方向：连接码早已和二维码一起显示（PairingReady），手机自己从二维码里带，这里不用再给。
+                    // 车机主动回连方向：没有二维码，手机不认这台车机时要求输码——把连接码显示在车机上，
+                    // 请车主在手机上输入。以前这里直接结束（退回扫码），在被禁了 RFCOMM 服务端的车机上就是死路。
                     if (reconnect != null && a.mode == AuthMode.PIN_PAIRING) {
-                        finish(WirelessEndReason.ReconnectFailed("手机要求输码配对", needsPairing = true), nowMillis, out)
-                        return
+                        if (!pinCodeShown) {
+                            pinCodeShown = true
+                            out.add(WirelessEvent.PinCodeRequired(pinCode))
+                            diag(SessionLayer.AUTH, "手机要求输码配对（首次连这台车机，或手机里删过它），把连接码显示在车机上", out)
+                        }
                     }
                     out.common(SessionEvent.AuthStarted(a.mode))
                 }
