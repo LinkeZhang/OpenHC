@@ -556,9 +556,15 @@ internal class SettingsView(context: Context) : ScrollView(context) {
                 )
             }
         }
+        // 列表高度按内容算：手机多才需要滚动，没配对时别让空列表占满屏幕把手填地址挤出可视区。
+        val listHeight = if (paired.isEmpty()) {
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        } else {
+            minOf(context.dp(220f), context.dp(56f) * paired.size + context.dp(8f))
+        }
         inner.addView(ScrollView(context).apply {
             addView(listBox)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, context.dp(220f))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, listHeight)
         })
 
         // 没配对过、或列表里没有要连的那台：手填地址。
@@ -577,9 +583,9 @@ internal class SettingsView(context: Context) : ScrollView(context) {
 
         val dialog = android.app.AlertDialog.Builder(context)
             .setTitle(R.string.settings_reconnect_phone)
-            .setView(ScrollView(context).apply {
+            // 不再套一层 ScrollView：里层列表自己滚，外层再滚一次在老车机上容易点不动输入框。
+            .setView(inner.apply {
                 setPadding(context.dp(16f), context.dp(8f), context.dp(16f), context.dp(8f))
-                addView(inner)
             })
             .setPositiveButton(R.string.settings_reconnect_phone_value, null)
             .setNegativeButton(android.R.string.cancel, null)
