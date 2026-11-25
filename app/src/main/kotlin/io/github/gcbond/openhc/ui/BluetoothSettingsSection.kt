@@ -47,6 +47,7 @@ internal fun BluetoothAddressSection(
     val address = current.address
     ValueRow(
         title = stringResource(R.string.settings_bt),
+        summary = stringResource(R.string.settings_bt_summary),
         value = address ?: stringResource(R.string.settings_bt_value_missing),
         description = when (current.source) {
             BluetoothSource.SYSTEM_PROPERTY -> stringResource(R.string.settings_bt_current_property, address ?: "")

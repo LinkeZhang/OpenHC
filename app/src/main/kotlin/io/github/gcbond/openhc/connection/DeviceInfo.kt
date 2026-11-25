@@ -27,12 +27,16 @@ internal object DeviceInfo {
      *
      * 安卓 6.0 起普通应用拿不到本机蓝牙地址（公开接口一律给 `02:00:00:00:00:00`），但车机厂商通常会在系统属性
      * 或系统设置里留一份，所以这里按「最可能是真地址」的顺序逐个试：
-     * 1. 一批常见的蓝牙地址系统属性（不同方案商写法不同，[BluetoothAddressPolicy.PROPERTY_KEYS] 里都列了）；
+     * 1. 一批常见的蓝牙地址系统属性（不同方案商写法不同，[BluetoothAddressPolicy.PROPERTY_KEYS] 里都列了，
+     *    含上游加的德赛西威一类车机用的 `persist.vehicle.bt.mac_addr`）；
      * 2. `Settings.Global` / `Settings.Secure` 里几个常见的键（部分车机系统把地址写在这里，普通应用可读）；
      * 3. 反射 `BluetoothAdapter.getAddress()`（安卓 6 之前是真地址，之后多半是占位值，试一下不吃亏）。
      *
      * 每个候选值都过一遍 [BluetoothAddressPolicy.normalize]，占位值（全 0、全 F、`02:00:00:00:00:00`）和格式不对的
      * 直接跳过，所以这里返回的一定是能直接用的地址。全都读不到时返回 null，界面上让车主手填。
+     *
+     * 系统属性的读取接口没有公开，只能反射。安卓 9 起非公开接口受限，这个接口属于允许调用、系统只记一行警告的那一类；
+     * 将来的系统要是拦了，这里返回 null，退回手填地址。
      */
     fun systemBluetoothAddress(context: Context? = null): String? {
         // 反射蓝牙服务内部接口拿到的地址是最可靠的（实测某车机只有这条路读到的是「关于本机」里的真地址），
