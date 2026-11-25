@@ -32,7 +32,7 @@
     <string name="wireless_hint_auth_pairing">第一次连接这台车机，正在配对…</string>
     <string name="wireless_hint_enter_pin_on_phone">手机要求配对：请在手机上输入下面的 6 位连接码。</string>
     <string name="wireless_hint_auth_trusted">正在认证（免码回连）…</string>
-    <string name="wireless_hint_confirm_on_phone">手机上弹出了确认框，请在手机上点「连接」。（手机开着热点时会这样问一次）</string>
+    <string name="wireless_hint_confirm_on_phone">手机没有同意开认证通道，车机正在每隔几秒再问一次。如果手机上有确认框，请点「连接」；没有的话请点亮手机屏幕、保持 HiCar/蓝牙页面在前台。</string>
     <string name="wireless_hint_wifi_handshake">手机已经从 WiFi 连上，正在握手…</string>
     <string name="wireless_hint_device_session">正在建立设备会话…</string>
     <string name="wireless_hint_waiting_projection">设备会话已建立，等待手机开始投屏…</string>
@@ -58,7 +58,7 @@
 
     <!-- 结束原因 -->
     <string name="wireless_end_auth_closed">配对没有完成：手机断开了认证（在手机上取消了，或者二维码已经过期，请重新开始）</string>
-    <string name="wireless_end_not_trusted">手机要求免码回连，但车机上没有它的配对记录。请在手机上删除这台车机，再重新扫码配对。</string>
+    <string name="wireless_end_not_trusted">手机认为已经配过这台车机（所以不要求输码），但车机上没有它的配对记录，两边对不上。请到手机蓝牙设置里「忽略/取消配对」这台车机，再重新连一次。</string>
     <string name="wireless_end_auth_failed">认证失败（%1$s）</string>
     <string name="wireless_end_step_bluetooth">蓝牙连接失败（%1$s）</string>
     <string name="wireless_end_bluetooth_listen">这台车机的蓝牙不让本应用开监听通道，无线投屏用不了，请改用数据线连接。详细原因已写进诊断日志。</string>

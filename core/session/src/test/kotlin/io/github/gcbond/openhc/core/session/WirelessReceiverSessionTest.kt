@@ -811,7 +811,8 @@ class WirelessReceiverSessionTest {
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
         // 手机暂时拒绝（例如在问用户要不要关热点）：不结束，控制通道留着。
         assertEquals(listOf("event ReconnectAwaitingPhone(状态=1)"), d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no"))
-        assertTrue(d.tick(d.now + d.config.timeouts.reconnectConfirmMillis - 1).isEmpty())
+        // 手机自己来请求之前，重问的定时还没到：什么也不发。
+        assertTrue(d.tick(d.now + d.config.timeouts.reconnectRetryMillis - 1).isEmpty())
         // 手机自己来请求开认证子通道：照手机连上来时的做法开监听、回通道号。
         assertEquals(listOf("rfcomm-listen BLUETOOTH_AUTH $subchannelUuid"), d.btData(WirelessChannel.BLUETOOTH_CONTROL, "auth?"))
         assertEquals(listOf("rfcomm-write BLUETOOTH_CONTROL rfcomm:5"), d.btListening(WirelessChannel.BLUETOOTH_AUTH, 5))
@@ -828,17 +829,44 @@ class WirelessReceiverSessionTest {
     }
 
     @Test
-    fun reconnectDeclinedEndsWhenPhoneNeverConfirms() {
+    fun reconnectDeclinedRetriesThenEndsWhenPhoneNeverAgrees() {
         val d = Driver()
         d.startReconnect()
         d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
+        // 到点再问一次：重发命令 3，手机又拒（照样是「等手机」）。
+        val retryAt = d.now + d.config.timeouts.reconnectRetryMillis
+        assertEquals(
+            listOf("rfcomm-write BLUETOOTH_CONTROL authreq-again"),
+            d.tick(retryAt).filterNot { it == "diag" },
+        )
+        assertTrue(d.layers.calls.contains("bt.repeatAuthChannelRequest"))
+        assertEquals(listOf("event ReconnectAwaitingPhone(状态=1)"), d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no"))
+        // 总时限从第一次被拒算起，重问不往后推。
         d.tick(d.now + d.config.timeouts.reconnectConfirmMillis)
         val reason = assertIs<WirelessEndReason.ReconnectFailed>(d.ended())
-        assertEquals("手机上一直没确认", reason.detail)
+        assertEquals("手机上一直没同意", reason.detail)
         assertFalse(reason.needsPairing)
         assertTrue("rfcomm-close BLUETOOTH_CONTROL" in d.outputs.map { d.describe(it) })
+    }
+
+    @Test
+    fun reconnectRetryStopsAfterLimit() {
+        val d = Driver()
+        d.startReconnect()
+        d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
+        d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
+        d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
+        // 一直拒：每 8 秒重问一次，问满 5 次就不再问，只等手机自己来。
+        repeat(5) {
+            d.tick(d.now + d.config.timeouts.reconnectRetryMillis)
+            d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
+        }
+        val asked = d.layers.calls.count { it == "bt.repeatAuthChannelRequest" }
+        assertEquals(5, asked)
+        assertTrue(d.tick(d.now + d.config.timeouts.reconnectRetryMillis * 3).isEmpty())
+        assertEquals(5, d.layers.calls.count { it == "bt.repeatAuthChannelRequest" })
     }
 
     @Test
@@ -849,7 +877,7 @@ class WirelessReceiverSessionTest {
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
         d.btClosed(WirelessChannel.BLUETOOTH_CONTROL)
-        assertEquals("手机上没确认（关了连接）", assertIs<WirelessEndReason.ReconnectFailed>(d.ended()).detail)
+        assertEquals("手机没同意（关了连接）", assertIs<WirelessEndReason.ReconnectFailed>(d.ended()).detail)
     }
 
     @Test

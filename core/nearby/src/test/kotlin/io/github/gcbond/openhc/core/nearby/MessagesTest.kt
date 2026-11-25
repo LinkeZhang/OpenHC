@@ -108,4 +108,25 @@ class MessagesTest {
         val resp = SocketMessages.parseResponse(Tlv.parseAll(payload).single().value)
         assertContentEquals(oddTag, resp.tag)
     }
+
+    /**
+     * 实车（华为手机 + 安卓 5.1 车机，2026-11-25）：车机主动回连、请手机开认证子通道，手机回拒绝，
+     * 端口字段写成 4 个带续位的 `7F 7F 7F 7F`（标准 EA 里没有终止位＝非法编码）。
+     * 以前整条应答被丢掉，车机不知道手机已经拒绝，只能干等 60 秒超时；现在按「端口 0」继续读。
+     */
+    @Test
+    fun responseToleratesUnterminatedPortOnReject() {
+        val payload = hex(
+            "84a8" + "81" + "7f7f7f7f" + "82" + "93" + "8e" + "485541574549204d617465203430" + "80" + "90" +
+                "0000fe3600001000800000805f9b34fb",
+        )
+        val resp = SocketMessages.parseResponse(Tlv.parseAll(payload).single().value)
+        assertEquals(1, resp.status)
+        assertEquals(0, resp.port)
+        assertEquals(2, resp.channel)
+        assertEquals(19, resp.businessId)
+        assertEquals("HUAWEI Mate 40", String(resp.tag, Charsets.UTF_8))
+        assertEquals(0, resp.protocol)
+        assertEquals("0000fe3600001000800000805f9b34fb", resp.uuid!!.toHex())
+    }
 }

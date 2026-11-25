@@ -127,6 +127,18 @@ class WirelessReceiverSession internal constructor(
     /** 主动回连：手机暂时拒绝过、正在等手机上的确认。 */
     private var awaitingPhone = false
 
+    /** 主动回连：上次被拒之后隔多久再请手机开一次认证子通道；null 表示不再重问。 */
+    private var reconnectRetryDeadline: Long? = null
+
+    /**
+     * 主动回连：从第一次被拒算起，最多等手机多久。重问不会把这个时限往后推——否则手机每次都拒，
+     * 会话就永远不结束。
+     */
+    private var reconnectConfirmDeadline: Long? = null
+
+    /** 主动回连：重问过几次（诊断用，也用来给重问次数封顶）。 */
+    private var reconnectRetries = 0
+
     /** 主动回连：已经因为手机要求输码把连接码显示过一次了（手机重发握手不再重复提示）。 */
     private var pinCodeShown = false
 
@@ -163,7 +175,8 @@ class WirelessReceiverSession internal constructor(
             if (ended) return null
             val handshake = nearby?.takeIf { control?.state == State.OPEN }?.nextTickAtMillis
             return listOfNotNull(
-                handshake, reconnectDeadline, authAcceptDeadline, authDeadline, networkDeadline, joinDeadline, wired?.nextTickAtMillis,
+                handshake, reconnectDeadline, reconnectRetryDeadline, authAcceptDeadline, authDeadline, networkDeadline, joinDeadline,
+                wired?.nextTickAtMillis,
             ).minOrNull()
         }
 
@@ -350,7 +363,7 @@ class WirelessReceiverSession internal constructor(
                 when {
                     phoneOnWifi -> diag(SessionLayer.SESSION, "蓝牙控制通道被手机关闭（WiFi 已接上，会话继续）", out)
                     reconnect != null && !authSucceeded -> finish(
-                        WirelessEndReason.ReconnectFailed(if (awaitingPhone) "手机上没确认（关了连接）" else "手机关了蓝牙控制通道"),
+                        WirelessEndReason.ReconnectFailed(if (awaitingPhone) "手机没同意（关了连接）" else "手机关了蓝牙控制通道"),
                         nowMillis, out,
                     )
                     else -> finish(WirelessEndReason.Failed(WirelessStep.BLUETOOTH, "WiFi 数据通道接上之前手机关闭了蓝牙控制通道"), nowMillis, out)
@@ -434,8 +447,9 @@ class WirelessReceiverSession internal constructor(
             handleBluetooth(call(WirelessStep.BLUETOOTH) { n.onTick(nowMillis) }, nowMillis, out)
         }
         if (due(reconnectDeadline, nowMillis)) {
-            finish(WirelessEndReason.ReconnectFailed(if (awaitingPhone) "手机上一直没确认" else "手机一直没回应"), nowMillis, out)
+            finish(WirelessEndReason.ReconnectFailed(if (awaitingPhone) "手机上一直没同意" else "手机一直没回应"), nowMillis, out)
         }
+        if (due(reconnectRetryDeadline, nowMillis)) retryAuthChannel(nowMillis, out)
         if (due(authAcceptDeadline, nowMillis)) {
             val detail = if (authListener == null) {
                 "车机 ${config.timeouts.reconnectAuthConnectMillis} 毫秒内没连上手机的认证子通道"
@@ -514,6 +528,8 @@ class WirelessReceiverSession internal constructor(
                 return
             }
             reconnectDeadline = null
+            reconnectConfirmDeadline = null
+            reconnectRetryDeadline = null
         }
         val listener = authListener
         when {
@@ -595,6 +611,8 @@ class WirelessReceiverSession internal constructor(
             return
         }
         reconnectDeadline = null
+        reconnectConfirmDeadline = null
+        reconnectRetryDeadline = null
         val ep = newEndpoint(WirelessChannel.BLUETOOTH_AUTH, listener = false)
         authConn = ep
         authAcceptDeadline = nowMillis + config.timeouts.reconnectAuthConnectMillis
@@ -609,9 +627,12 @@ class WirelessReceiverSession internal constructor(
      * 手机暂时没同意开认证子通道。被拒之后怎么办只在这里定。
      *
      * 实车（2026-11-22）：手机开着热点时会弹「连接要关热点」的确认框，约 10 秒后先回拒绝，控制通道却一直留着，
-     * 用户点了取消才关；原厂车机拨通后也是留着连接等 120 秒。所以这里不结束：控制通道留着等手机上的确认，
-     * 手机自己再来请求开认证子通道时照常接受（[onSocketRequest]），手机关掉连接或到时没等到就结束。
-     * 用户在手机上点了连接之后手机具体怎么走（自己发请求，还是等车机再请求），待实车验证。
+     * 用户点了取消才关；原厂车机拨通后也是留着连接等 120 秒。所以这里不结束：控制通道留着，
+     * 隔 [WirelessTimeouts.reconnectRetryMillis] 再请手机开一次认证子通道（[repeatAuthChannelRequest]），
+     * 手机自己再来请求开认证子通道时也照常接受（[onSocketRequest]），手机关掉连接或到时没等到就结束。
+     *
+     * 为什么要重问：实车（2026-11-25，安卓 5.1 车机 + 华为手机）上手机拒了一次之后就一直在等车机再问，
+     * 以前车机只干等 120 秒，到点报「手机上一直没确认」——而手机从头到尾没弹过任何框。
      */
     private fun onReconnectDeclined(status: Int, nowMillis: Long, out: Out) {
         if (reconnect == null || authConn != null) {
@@ -619,8 +640,37 @@ class WirelessReceiverSession internal constructor(
             return
         }
         awaitingPhone = true
-        reconnectDeadline = nowMillis + config.timeouts.reconnectConfirmMillis
+        // 总时限只从第一次被拒算起，重问不往后推。
+        if (reconnectConfirmDeadline == null) reconnectConfirmDeadline = nowMillis + config.timeouts.reconnectConfirmMillis
+        reconnectDeadline = reconnectConfirmDeadline
         out.add(WirelessEvent.ReconnectAwaitingPhone(status))
+        scheduleRetry(nowMillis, out)
+    }
+
+    /** 排下一次重问；次数用完或总时限快到了就不排，只等手机自己来请求。 */
+    private fun scheduleRetry(nowMillis: Long, out: Out) {
+        val confirm = reconnectConfirmDeadline
+        if (reconnectRetries >= MAX_RECONNECT_RETRIES) {
+            reconnectRetryDeadline = null
+            diag(SessionLayer.SESSION, "认证子通道已经重问过 $reconnectRetries 次，不再重问，等手机自己来请求", out)
+            return
+        }
+        val at = nowMillis + config.timeouts.reconnectRetryMillis
+        if (confirm != null && at >= confirm) {
+            reconnectRetryDeadline = null
+            return
+        }
+        reconnectRetryDeadline = at
+    }
+
+    /** 到点了：再请手机开一次认证子通道。等应答的时限不另设，超了还是按总时限结束。 */
+    private fun retryAuthChannel(nowMillis: Long, out: Out) {
+        reconnectRetryDeadline = null
+        val layer = nearby ?: return
+        if (reconnect == null || authConn != null || ended) return
+        reconnectRetries++
+        diag(SessionLayer.SESSION, "手机上次没同意开认证子通道，第 $reconnectRetries 次再问一次", out)
+        handleBluetooth(call(WirelessStep.BLUETOOTH) { layer.repeatAuthChannelRequest() }, nowMillis, out)
     }
 
     // ---------------- 认证 ----------------
@@ -839,6 +889,8 @@ class WirelessReceiverSession internal constructor(
         pendingAuthRequests.clear()
         pendingDataChannel = null
         reconnectDeadline = null
+        reconnectConfirmDeadline = null
+        reconnectRetryDeadline = null
         authAcceptDeadline = null
         authDeadline = null
         networkDeadline = null
@@ -913,6 +965,9 @@ class WirelessReceiverSession internal constructor(
         "WirelessReceiverSession(已结束=$ended, 认证=$authSucceeded, 频率=$negotiatedFrequency, WiFi 已接上=$phoneOnWifi)"
 
     private companion object {
+        /** 被拒之后最多再请手机开几次认证子通道：8 秒一次，约 40 秒内问 5 次，之后只等手机自己来。 */
+        const val MAX_RECONNECT_RETRIES = 5
+
         fun describe(e: Throwable): String = e.javaClass.simpleName + (e.message?.let { "：$it" } ?: "")
     }
 }

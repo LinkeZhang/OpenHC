@@ -188,6 +188,26 @@ class NearbySession(
         check(authRequestTag == null) { "认证子通道只请求一次" }
         require(tag.isNotEmpty()) { "业务标签不能为空" }
         authRequestTag = tag.copyOf()
+        return sendAuthChannelRequest(tag)
+    }
+
+    /**
+     * 手机拒绝过之后再请求一次认证子通道：通道、业务号、业务标签都不变，只把「已经应答过」的标记清掉，
+     * 好让手机这次的应答还能被 [onSocketResponse] 认出来。没请求过就抛异常。
+     *
+     * 为什么要重试：实车（安卓 5.1 车机 + 华为手机）上手机拒了一次之后就一直在等车机再问，
+     * 车机以前拒了只干等 120 秒，等于白白浪费一次机会。
+     */
+    fun repeatAuthChannelRequest(): List<NearbyAction> {
+        check(!closed) { "控制通道已作废" }
+        check(link == NearbyLink.BLUETOOTH && initiator) { "只有车机主动连上的蓝牙控制通道才请求认证子通道" }
+        check(handshakeComplete) { "控制通道握手还没完成" }
+        val tag = authRequestTag ?: throw IllegalStateException("还没请求过认证子通道")
+        authAnswered = false
+        return sendAuthChannelRequest(tag)
+    }
+
+    private fun sendAuthChannelRequest(tag: ByteArray): List<NearbyAction> {
         val request = SocketMessages.Request(NearbyLink.BLUETOOTH.channel, BUSINESS_AUTH, tag.copyOf(), 0, null)
         val out = ArrayList<NearbyAction>(1)
         send(SocketMessages.OUTER_TYPE_MESSAGE, encodeTlv(SocketMessages.CMD_CREATE_REQUEST, SocketMessages.encodeRequest(request)), out)
@@ -237,8 +257,9 @@ class NearbySession(
     }
 
     private fun handleFrame(frame: NearbyFrame, out: MutableList<NearbyAction>) {
+        var payload: ByteArray? = null
         try {
-            val payload = cipher.open(frame)
+            payload = cipher.open(frame)
             when (frame.outerType) {
                 ChannelManagement.OUTER_TYPE -> handleChannelManagement(payload, out)
                 SocketMessages.OUTER_TYPE_MESSAGE, SocketMessages.OUTER_TYPE_RESOURCE ->
@@ -248,9 +269,28 @@ class NearbySession(
                 else -> handleUnknownLayer(frame.outerType, payload, out)
             }
         } catch (e: MalformedMessageException) {
-            // 写明是哪一层，方便看诊断日志时对上是哪条消息。
-            out.add(NearbyEvent.InputDiscarded("外层类型 ${frame.outerType}：${e.message ?: "载荷不合法"}", frame.payloadView().size))
+            // 写明是哪一层，方便看诊断日志时对上是哪条消息；把解密后的字节也带上（前 48 字节），
+            // 解析失败多半是格式对不上或解密结果不对，没有原始字节没法判断。
+            out.add(
+                NearbyEvent.InputDiscarded(
+                    "外层类型 ${frame.outerType}：${e.message ?: "载荷不合法"}｜明文 ${payload?.let { hexPrefix(it, 48) } ?: "（解密失败）"}",
+                    frame.payloadView().size,
+                ),
+            )
         }
+    }
+
+    /** 诊断用：把字节转成 `AA BB CC` 形式，最多 [max] 个字节。 */
+    private fun hexPrefix(bytes: ByteArray, max: Int): String {
+        val n = minOf(bytes.size, max)
+        val sb = StringBuilder(n * 3)
+        for (i in 0 until n) {
+            if (i > 0) sb.append(' ')
+            val b = bytes[i].toInt() and 0xFF
+            sb.append(HEX[b ushr 4]).append(HEX[b and 0x0F])
+        }
+        if (bytes.size > n) sb.append(" …（共 ${bytes.size} 字节）")
+        return sb.toString()
     }
 
     /**
@@ -561,6 +601,8 @@ class NearbySession(
         private val ENCRYPTION_ON = byteArrayOf(1)
 
         private const val UUID_BYTES = 16
+
+        private val HEX = "0123456789ABCDEF".toCharArray()
 
         /** 消息层的探活：收到命令 1 回空的命令 2。 */
         private const val MESSAGE_PROBE = 1

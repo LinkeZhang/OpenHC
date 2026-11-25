@@ -536,6 +536,13 @@ internal class SettingsView(context: Context) : ScrollView(context) {
             context.textView(context.getString(R.string.settings_reconnect_phone_dialog_hint), sizeSp = 13f, color = Palette.Muted),
         )
 
+        // 对话框要先建出来：点手机时要先关掉它，否则它会盖在首页上，车主看不到连接进度和连接码。
+        var dialog: android.app.AlertDialog? = null
+        fun dial(address: String) {
+            dialog?.dismiss()
+            dialFromDialog(address)
+        }
+
         val paired = PairedPhones.list(context)
         val listBox = context.column()
         if (paired.isEmpty()) {
@@ -551,7 +558,7 @@ internal class SettingsView(context: Context) : ScrollView(context) {
                         setPadding(context.dp(4f), context.dp(9f), context.dp(4f), context.dp(9f))
                         isClickable = true
                         isFocusable = true
-                        setOnClickListener { dialFromDialog(phone.address) }
+                        setOnClickListener { dial(phone.address) }
                     },
                 )
             }
@@ -581,7 +588,7 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         }
         inner.addView(input)
 
-        val dialog = android.app.AlertDialog.Builder(context)
+        val alert = android.app.AlertDialog.Builder(context)
             .setTitle(R.string.settings_reconnect_phone)
             // 不再套一层 ScrollView：里层列表自己滚，外层再滚一次在老车机上容易点不动输入框。
             .setView(inner.apply {
@@ -590,19 +597,19 @@ internal class SettingsView(context: Context) : ScrollView(context) {
             .setPositiveButton(R.string.settings_reconnect_phone_value, null)
             .setNegativeButton(android.R.string.cancel, null)
             .create()
+        dialog = alert
         // 手填地址点「连接」：格式对才拨，对话框留着让车主改。
-        dialog.setOnShowListener {
-            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+        alert.setOnShowListener {
+            alert.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val normalized = BluetoothAddressPolicy.normalize(input.text.toString())
                 if (normalized == null) {
                     Toast.makeText(context, R.string.settings_bt_invalid, Toast.LENGTH_SHORT).show()
                 } else {
-                    dialog.dismiss()
-                    dialFromDialog(normalized)
+                    dial(normalized)
                 }
             }
         }
-        dialog.show()
+        alert.show()
     }
 
     private fun dialFromDialog(address: String) {

@@ -116,6 +116,11 @@ internal class FakeBluetoothNearby(private val calls: MutableList<String>) : Blu
         return listOf(BluetoothOutput.Send("authreq".bytes()))
     }
 
+    override fun repeatAuthChannelRequest(): List<BluetoothOutput> {
+        calls += "bt.repeatAuthChannelRequest"
+        return listOf(BluetoothOutput.Send("authreq-again".bytes()))
+    }
+
     override fun rfcommUuid(request: BluetoothOutput.SocketRequest): UUID = uuid
 
     override fun acceptRfcomm(request: BluetoothOutput.SocketRequest, rfcommChannel: Int): List<BluetoothOutput> {

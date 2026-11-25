@@ -68,6 +68,9 @@ internal interface BluetoothNearbyLayer {
     /** 车机主动回连：握手完成后请手机开认证子通道，[tag] 是业务标签（手机设备名的 UTF-8）。 */
     fun requestAuthChannel(tag: ByteArray): List<BluetoothOutput>
 
+    /** 手机拒绝过之后再请一次开认证子通道，业务标签沿用上次的。 */
+    fun repeatAuthChannelRequest(): List<BluetoothOutput>
+
     /** 子通道要监听的服务 UUID。 */
     fun rfcommUuid(request: BluetoothOutput.SocketRequest): UUID
     fun acceptRfcomm(request: BluetoothOutput.SocketRequest, rfcommChannel: Int): List<BluetoothOutput>
@@ -124,6 +127,8 @@ internal class BluetoothNearbyAdapter(private val session: NearbySession) : Blue
     override fun onTick(nowMillis: Long) = convert(session.onTick(nowMillis))
 
     override fun requestAuthChannel(tag: ByteArray) = convert(session.requestAuthChannel(tag))
+
+    override fun repeatAuthChannelRequest() = convert(session.repeatAuthChannelRequest())
 
     override fun rfcommUuid(request: BluetoothOutput.SocketRequest): UUID =
         NearbySession.rfcommServiceUuid(request.handle as NearbyEvent.SocketRequested)

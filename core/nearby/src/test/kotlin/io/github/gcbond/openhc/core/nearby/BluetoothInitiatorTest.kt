@@ -157,6 +157,36 @@ class BluetoothInitiatorTest {
     }
 
     @Test
+    fun repeatRequestResendsTheSameCmd3AndAcceptsTheAnswerAgain() {
+        val s = requested()
+        // 手机拒了一次。
+        assertEquals(
+            SocketMessages.STATUS_REJECTED,
+            s.feed(cmd4(SocketMessages.STATUS_REJECTED, 0, uuid = null))
+                .filterIsInstance<NearbyEvent.AuthChannelRejected>().single().status,
+        )
+        // 再请求一次：命令 3 的内容和第一次完全一样（通道 2、业务 19、标签 = 手机名、协议 0、不带 UUID）。
+        val (f, payload) = open(sends(s.repeatAuthChannelRequest()).single())
+        assertEquals(SocketMessages.OUTER_TYPE_MESSAGE, f.outerType)
+        assertTrue(f.isEncrypted)
+        val req = SocketMessages.parseRequest(Tlv.parseAll(payload).single().valueView())
+        assertEquals(NearbyLink.BLUETOOTH.channel, req.channel)
+        assertEquals(NearbySession.BUSINESS_AUTH, req.businessId)
+        assertEquals(phoneName, req.tag.toString(Charsets.UTF_8))
+        assertNull(req.uuid)
+        // 这次手机同意了：照样认出是给认证开的子通道。
+        assertEquals(8, s.feed(cmd4(SocketMessages.STATUS_ACCEPTED, 8)).filterIsInstance<NearbyEvent.AuthChannelReady>().single().port)
+    }
+
+    @Test
+    fun repeatRequestBeforeAnyRequestFails() {
+        val s = session(FixedSecureRandom(hex("00005ba0"), Vectors.SEED_A, Vectors.SEED_B))
+        s.start(0L)
+        s.feed(phoneHandshakeReply(Vectors.SEED_C))
+        assertFailsWith<IllegalStateException> { s.repeatAuthChannelRequest() }
+    }
+
+    @Test
     fun cmd4BeforeAnyRequestIsHandedOut() {
         val s = session(FixedSecureRandom(hex("00005ba0"), Vectors.SEED_A, Vectors.SEED_B))
         s.start(0L)

@@ -73,6 +73,25 @@ class ByteReader(
         return Ea.valueOf(packed)
     }
 
+    /**
+     * 读一个 EA，但容忍「连续 [Ea.MAX_BYTES] 字节都没有终止位」：跳过这 [Ea.MAX_BYTES] 字节，返回 [fallback]。
+     *
+     * 有些手机用「4 个字节全带续位」来表示「这个字段没有值」（实车见：车机主动回连时手机拒绝开认证子通道，
+     * 应答里的端口写 `7F 7F 7F 7F`）。按标准这是非法编码，但整条应答的其余字段都是对的，
+     * 因此判成「没有端口」继续往下读，比丢掉整条应答有用得多。
+     */
+    fun eaOr(fallback: Int): Int {
+        val packed = Ea.decode(data, position, limit)
+        if (packed == Ea.NEED_MORE) throw MalformedMessageException("EA 变长整数被截断（位置 $limit）")
+        if (packed == Ea.UNTERMINATED) {
+            need(Ea.MAX_BYTES)
+            position += Ea.MAX_BYTES
+            return fallback
+        }
+        position += Ea.sizeOf(packed)
+        return Ea.valueOf(packed)
+    }
+
     fun bytes(count: Int): ByteArray {
         require(count >= 0) { "长度不能为负: $count" }
         need(count)

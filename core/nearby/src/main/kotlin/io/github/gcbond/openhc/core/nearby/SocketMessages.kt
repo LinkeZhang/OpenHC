@@ -80,7 +80,9 @@ internal object SocketMessages {
     fun parseResponse(value: ByteArray): Response {
         val r = ByteReader(value)
         val status = r.ea()
-        val port = r.ea()
+        // 端口：手机拒绝时写 4 个带续位的字节表示「没有端口」（实车：华为手机拒绝开认证子通道，`7F 7F 7F 7F`）。
+        // 按标准这是非法编码，但整条应答其余字段都对，按「端口 0」继续读比丢掉整条应答有用。
+        val port = r.eaOr(0)
         val channel = r.ea()
         val businessId = r.ea()
         val tag = r.bytes(lengthField(r, "标签"))

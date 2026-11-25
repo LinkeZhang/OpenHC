@@ -171,8 +171,9 @@ sealed class WirelessEvent : WirelessOutput {
 
     /** 会话结束。只出现一次，总在最后；之前已给出关闭全部资源的动作。 */
     /**
-     * 车机主动回连时，手机暂时没同意开认证子通道（[status]）。多半是手机弹了确认框（例如手机开着热点，要问用户关不关），
-     * 控制通道先留着等手机上的确认；等不到会以 [WirelessEndReason.ReconnectFailed] 结束。
+     * 车机主动回连时，手机暂时没同意开认证子通道（[status]）。手机没同意有几种情形，从这一条看不出是哪一种
+     * （可能是手机开着热点要问用户，也可能只是这次不想理），所以界面上不能说死「手机弹了确认框」。
+     * 控制通道先留着，车机隔一会儿再问一次；等不到会以 [WirelessEndReason.ReconnectFailed] 结束。
      */
     class ReconnectAwaitingPhone(val status: Int) : WirelessEvent() {
         override fun toString() = "ReconnectAwaitingPhone(状态=$status)"
