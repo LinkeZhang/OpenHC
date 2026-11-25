@@ -199,6 +199,12 @@ class MainActivity : Activity() {
             systemBluetoothAddress = DeviceInfo.systemBluetoothAddress(this),
             // 「自动读取」按钮：用户手动触发，把所有来源的候选值都列出来让车主挑。
             onReadCandidates = { DeviceInfo.bluetoothAddressCandidates(this) },
+            // 设置页「让车机连这台手机」：先回首页（连接码、进度都在首页显示），再让车机主动拨这台手机。
+            onReconnectPhone = { address ->
+                screen = Screen.HOME
+                renderCurrent()
+                wirelessStart.reconnect(address)
+            },
             onBack = {
                 wireless.onSettingsClosed()
                 screen = Screen.HOME
@@ -399,6 +405,10 @@ class MainActivity : Activity() {
                 }
                 askNextPermission()
             }
+            // 无线连接/车机主动拨号前申请的权限：给了就接着开始。
+            WirelessStartFlow.REQUEST_CODE -> wirelessStart.onPermissionResult()
+            // 设置页「补全手机蓝牙配对」申请的权限。
+            SettingsView.REQ_LE_PAIRING -> settingsView?.onPermissionResult()
         }
     }
 

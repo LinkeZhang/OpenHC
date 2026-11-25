@@ -249,7 +249,7 @@ class WirelessController(
         val last = wirelessPrefs.lastPhone ?: return null
         val adapter = BluetoothStatus.adapter(app) ?: return null
         if (phoneConnected(adapter, last) != true) return null
-        val name = phoneName(adapter, last) ?: return null
+        val name = phoneName(adapter, last) ?: fallbackPhoneName(last)
         return ReconnectTarget(last, name)
     }
 
@@ -493,7 +493,10 @@ class WirelessController(
         } catch (e: IOException) {
             return blocked(kind, WirelessNotice.TrustStoreUnavailable(e.message ?: e.javaClass.simpleName), AutoHold.START_FAILED)
         }
-        if (kind != Kind.MANUAL && trustStore.peerCount == 0) {
+        // 只有「等已配对的手机回连」（Kind.AUTO）才要求信任库里有手机：它连的就是已经认证过的手机。
+        // 车机主动回连（Kind.RECONNECT）不看这个：车主在设置页手点一台手机来拨时，这台手机多半从没连成功过
+        // （信任库只在投屏开始时才记下手机），拦住就等于永远拨不了——被禁了蓝牙服务端的车机上也就永远连不上。
+        if (kind == Kind.AUTO && trustStore.peerCount == 0) {
             return blocked(kind, WirelessNotice.StartFailed("没有配对过的手机"), AutoHold.NO_PAIRED_PHONE)
         }
         val fullScreen = settings.fullScreen
@@ -718,11 +721,13 @@ class WirelessController(
             return giveUp()
         }
         val adapter = BluetoothStatus.adapter(app)
-        val name = adapter?.let { phoneName(it, address) }
-        if (name == null) {
-            Log.i(TAG, "${if (adapter == null) "车机没有蓝牙" else "读不到这台手机的蓝牙名"}，不拨（$why）")
+        if (adapter == null) {
+            Log.i(TAG, "车机没有蓝牙，不拨（$why）")
             return giveUp()
         }
+        // 读不到手机蓝牙名也照拨：这个名字只是请手机开认证子通道时带的业务标签，空的就按地址编一个。
+        // 以前读不到就放弃，在「没配对过、也读不到名字」的车机上等于永远拨不出去（被禁了服务端的车机就彻底连不上）。
+        val name = phoneName(adapter, address) ?: fallbackPhoneName(address)
         cancelAutoRetry()
         val target = ReconnectTarget(address, name)
         if (!surfaceUi(why)) {
@@ -784,6 +789,16 @@ class WirelessController(
         null
     } catch (e: SecurityException) {
         null
+    }
+
+    /**
+     * 读不到手机蓝牙名时的占位标签：拿地址末两段编一个，同一次连接里稳定、写进日志能对上是哪台手机。
+     * 手机那边只把它当业务标签回带（实车只验证过和手机蓝牙名一致的情况），不是空串就行。
+     */
+    private fun fallbackPhoneName(address: String): String {
+        val tail = address.replace(":", "").replace("-", "").takeLast(4).uppercase()
+        Log.i(TAG, "读不到手机蓝牙名，用占位标签 Phone-$tail（${MacText.mask(address)}）")
+        return "Phone-$tail"
     }
 
     /**

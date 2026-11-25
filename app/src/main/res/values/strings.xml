@@ -127,6 +127,15 @@
     <string name="settings_bt_read_not_found">没读到。你的车机把地址放在了本应用读不到的地方，请手动填写（可在车机上执行 adb shell getprop | grep -i bt 查找）。</string>
     <string name="settings_bt_hint">手填了有效地址时优先用手填的，清空就改用车机系统里读到的。地址变了，手机会把车机当成另一台车，需要重新输入连接码配对。</string>
 
+    <!-- 车机主动连手机（RFCOMM 客户端方向） -->
+    <string name="settings_reconnect_phone">让车机连这台手机</string>
+    <string name="settings_reconnect_phone_hint">车机开不了蓝牙服务端（扫码连不上、日志里是 Error: -1 之类）时用这里：车机主动去连手机。手机要先和车机蓝牙配对一次。</string>
+    <string name="settings_reconnect_phone_value">连接</string>
+    <string name="settings_reconnect_phone_dialog_hint">点下面的手机开始连。连上后车机会开热点、手机按提示投屏；第一次连要在手机上输入车机显示的连接码。</string>
+    <string name="settings_reconnect_phone_none">车机蓝牙里还没有配对的手机。请先在车机「设置 → 蓝牙」里配对一次，或直接在下面手填手机的蓝牙地址。</string>
+    <string name="settings_reconnect_phone_manual">手填手机蓝牙地址（格式 AA:BB:CC:DD:EE:FF）</string>
+    <string name="settings_reconnect_phone_dialing">车机正在连 %1$s…</string>
+
     <!-- 通知 -->
     <string name="notification_channel_name">投屏连接</string>
     <string name="notification_projecting">OpenHC 正在投屏</string>

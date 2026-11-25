@@ -50,6 +50,7 @@ import io.github.gcbond.openhc.wireless.LePairingRules
 import io.github.gcbond.openhc.wireless.LePairingSession
 import io.github.gcbond.openhc.wireless.LePairingStage
 import io.github.gcbond.openhc.wireless.LePairingStatus
+import io.github.gcbond.openhc.wireless.PairedPhones
 import io.github.gcbond.openhc.wireless.WirelessNetworkPlan
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -69,6 +70,9 @@ internal class SettingsView(context: Context) : ScrollView(context) {
     private var renderFn: (() -> Unit)? = null
     private var pendingLePairing = false
 
+    /** 「让车机连这台手机」点了以后回调给 Activity：车机主动拨这台手机。 */
+    private var reconnectPhoneAction: (String) -> Unit = {}
+
     init {
         setBackgroundColor(Palette.Background)
         isFillViewport = true
@@ -80,15 +84,17 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         systemBluetoothAddress: String?,
         onReadCandidates: () -> List<BluetoothAddressCandidate>,
         onBack: () -> Unit,
+        onReconnectPhone: (String) -> Unit = {},
     ) {
         onBackAction = onBack
+        reconnectPhoneAction = onReconnectPhone
         val wide = resources.displayMetrics.widthPixels >= context.dp(760f)
         val compact = resources.displayMetrics.heightPixels < context.dp(Dimens.CompactHeight)
         val side = context.dp(if (resources.displayMetrics.widthPixels >= context.dp(Dimens.WIDE_PAGE_MIN)) Dimens.PageSide else Dimens.PageSideNarrow)
 
         // 重画用同一个入口：设置项改完调 rebuild() 刷新界面。
         val rebuild = {
-            render(settings, systemBluetoothAddress, onReadCandidates, onBack)
+            render(settings, systemBluetoothAddress, onReadCandidates, onBack, onReconnectPhone)
         }
         renderFn = rebuild
 
@@ -305,6 +311,9 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         // 车机蓝牙地址。
         rows += bluetoothAddressRow(settings, systemBluetoothAddress, onReadCandidates, rebuild)
 
+        // 车机主动去连手机（RFCOMM 客户端方向）：车机不让开蓝牙服务端时唯一的连法。
+        rows += reconnectPhoneRow()
+
         // 补全手机蓝牙配对。
         rows += settingsRow(
             context,
@@ -504,6 +513,95 @@ internal class SettingsView(context: Context) : ScrollView(context) {
             topMargin = context.dp(8f)
         })
         return inner.apply { setPadding(0, context.dp(8f), 0, context.dp(8f)) }
+    }
+
+    /**
+     * 「让车机连这台手机」：车机主动去连手机的蓝牙控制服务（RFCOMM 客户端方向）。
+     *
+     * 给开不了蓝牙服务端的车机用（有些车机拒绝 listenUsingInsecureRfcommWithServiceRecord，扫码那条路走不通）。
+     * 点开列出车机蓝牙里已配对的手机让车主选，也可以手填蓝牙地址；点了马上拨，不看「连成功过的手机」记录。
+     */
+    private fun reconnectPhoneRow(): View {
+        return settingsRow(
+            context,
+            context.getString(R.string.settings_reconnect_phone),
+            context.getString(R.string.settings_reconnect_phone_hint),
+            actionButton(context, context.getString(R.string.settings_reconnect_phone_value)) { showReconnectPhoneDialog() },
+        )
+    }
+
+    private fun showReconnectPhoneDialog() {
+        val inner = context.column()
+        inner.addView(
+            context.textView(context.getString(R.string.settings_reconnect_phone_dialog_hint), sizeSp = 13f, color = Palette.Muted),
+        )
+
+        val paired = PairedPhones.list(context)
+        val listBox = context.column()
+        if (paired.isEmpty()) {
+            listBox.addView(
+                context.textView(context.getString(R.string.settings_reconnect_phone_none), sizeSp = 13f, color = Palette.Warn).apply {
+                    setPadding(0, context.dp(8f), 0, 0)
+                },
+            )
+        } else {
+            paired.forEach { phone ->
+                listBox.addView(
+                    context.textView("${phone.name}\n${phone.address}", sizeSp = 14f).apply {
+                        setPadding(context.dp(4f), context.dp(9f), context.dp(4f), context.dp(9f))
+                        isClickable = true
+                        isFocusable = true
+                        setOnClickListener { dialFromDialog(phone.address) }
+                    },
+                )
+            }
+        }
+        inner.addView(ScrollView(context).apply {
+            addView(listBox)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, context.dp(220f))
+        })
+
+        // 没配对过、或列表里没有要连的那台：手填地址。
+        inner.addView(context.textView(context.getString(R.string.settings_reconnect_phone_manual), sizeSp = 13f, color = Palette.Muted).apply {
+            setPadding(0, context.dp(10f), 0, context.dp(4f))
+        })
+        val input = EditText(context).apply {
+            hint = context.getString(R.string.settings_bt_manual_label)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            filters = arrayOf(InputFilter.LengthFilter(17))
+            setSingleLine(true)
+            setTextColor(Palette.Text)
+            setHintTextColor(Palette.Muted)
+        }
+        inner.addView(input)
+
+        val dialog = android.app.AlertDialog.Builder(context)
+            .setTitle(R.string.settings_reconnect_phone)
+            .setView(ScrollView(context).apply {
+                setPadding(context.dp(16f), context.dp(8f), context.dp(16f), context.dp(8f))
+                addView(inner)
+            })
+            .setPositiveButton(R.string.settings_reconnect_phone_value, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        // 手填地址点「连接」：格式对才拨，对话框留着让车主改。
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val normalized = BluetoothAddressPolicy.normalize(input.text.toString())
+                if (normalized == null) {
+                    Toast.makeText(context, R.string.settings_bt_invalid, Toast.LENGTH_SHORT).show()
+                } else {
+                    dialog.dismiss()
+                    dialFromDialog(normalized)
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun dialFromDialog(address: String) {
+        Toast.makeText(context, context.getString(R.string.settings_reconnect_phone_dialing, address), Toast.LENGTH_LONG).show()
+        reconnectPhoneAction(address)
     }
 
     /** 自动读到的候选值：点一个填进输入框。 */
@@ -992,7 +1090,8 @@ internal class SettingsView(context: Context) : ScrollView(context) {
         }
     }
 
-    private companion object {
+    internal companion object {
+        /** 「补全手机蓝牙配对」申请权限用的请求码；Activity 的 onRequestPermissionsResult 里按它回调 [onPermissionResult]。 */
         const val REQ_LE_PAIRING = 2001
     }
 }

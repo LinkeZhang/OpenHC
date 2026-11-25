@@ -26,6 +26,36 @@ internal class WirelessStartFlow(
     private val settings by lazy { AppSettings(activity) }
     private val wirelessPrefs by lazy { WirelessPreferences(activity) }
 
+    /** 申请权限期间要记住的那次拨号（设置页「让车机连这台手机」）。 */
+    private var pendingReconnect: String? = null
+
+    /**
+     * 设置页「让车机连这台手机」：车机主动去连 [address] 这台手机。权限齐了直接拨，
+     * 缺就先申请（和 [start] 同一套），回来以后补上这次拨号。
+     */
+    fun reconnect(address: String) {
+        val sdk = Build.VERSION.SDK_INT
+        if (WirelessPermissions.needsWriteSettings(sdk) && !canWriteSettings()) {
+            Log.i(TAG, "安卓 8.0 以下开热点要「修改系统设置」：拉起系统设置页")
+            controller().reportBlocked(WirelessNotice.WriteSettingsRequired)
+            openWriteSettings()
+            return
+        }
+        val missing = WirelessPermissions.missing(sdk, ::granted)
+        if (missing.isEmpty()) {
+            controller().reconnectPhone(address, "设置页指定")
+            return
+        }
+        pendingReconnect = address
+        Log.i(TAG, "申请权限（拨号前）：${missing.joinToString()}")
+        try {
+            io.github.gcbond.openhc.compat.Compat.requestPermissions(activity, missing.toTypedArray(), REQUEST_CODE)
+        } catch (e: ActivityNotFoundException) {
+            pendingReconnect = null
+            controller().reportBlocked(WirelessNotice.StartFailed("系统没有权限申请页"))
+        }
+    }
+
 
     /** 「开始无线连接」。 */
     fun start() {
@@ -70,11 +100,18 @@ internal class WirelessStartFlow(
 
     /** 由 [Activity.onRequestPermissionsResult] 转进来。 */
     fun onPermissionResult() {
+        // 设置页点「让车机连这台手机」时欠的权限：给齐了就把那次拨号补上。
+        val pendingDial = pendingReconnect
+        pendingReconnect = null
         val denied = WirelessPermissions.afterRequest(Build.VERSION.SDK_INT, ::granted) {
             io.github.gcbond.openhc.compat.Compat.shouldShowRationale(activity, it)
         }
         if (denied == null) {
-            controller().start()
+            if (pendingDial != null) {
+                controller().reconnectPhone(pendingDial, "设置页指定")
+            } else {
+                controller().start()
+            }
         } else {
             Log.i(TAG, "权限没有给全：$denied")
             controller().reportBlocked(denied)
