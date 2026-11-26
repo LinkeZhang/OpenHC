@@ -66,8 +66,12 @@ class AudioFocusController(context: Context, private val listener: Listener) : C
     /** 手机报通话状态（来电、通话中、挂断）。 */
     fun callStateChanged(phase: AudioFocusPolicy.CallPhase) = post { policy.callStateChanged(phase, now()) }
 
-    /** 手机报语音助手在用 / 空闲。 */
-    fun assistantStateChanged(active: Boolean) = post { policy.assistantStateChanged(active, now()) }
+    /**
+     * 手机报语音助手在用 / 空闲。[separate] 表示助手的声音是不是单独走了一路：只有分流时才压低媒体，
+     * 不分流时回答混在媒体里，压低它等于把回答自己也变小。
+     */
+    fun assistantStateChanged(active: Boolean, separate: Boolean = false) =
+        post { policy.assistantStateChanged(active, now(), separate) }
 
     override fun close() {
         handler.post {

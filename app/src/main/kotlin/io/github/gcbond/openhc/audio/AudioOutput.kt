@@ -166,7 +166,7 @@ internal class AudioOutput(
                 }
                 if (phase != null) focusController()?.callStateChanged(phase)
             }
-            is AudioEvent.PhoneVoiceState -> focusController()?.assistantStateChanged(event.active)
+            is AudioEvent.PhoneVoiceState -> focusController()?.assistantStateChanged(event.active, voiceIsSeparate())
             is AudioEvent.StreamRouted ->
                 if (event.unknownUsage) Log.w(TAG, "[$attemptId] SSRC ${event.ssrc} 带的用途 ${event.usage} 不认识，按媒体放")
             is AudioEvent.CodecVerdict -> onVerdict(event)
@@ -297,6 +297,17 @@ internal class AudioOutput(
         override fun onMediaFocus(held: Boolean) {
             mediaFocusChanged(held)
         }
+    }
+
+    /**
+     * 手机有没有把语音助手（提示与语音）单独分流成一路。
+     *
+     * 分流时回答在独立的一路上，压低媒体那一路（音乐）才能听清；不分流时提示音、音乐、回答全混在媒体一路，
+     * 压低媒体等于把回答自己也压到 30%——实测鸿蒙 NEXT 和 4.2 都不分流，表现就是「助手回答声音很小、
+     * 但点击的提示音正常」。所以只有看到真的建出过「提示与语音」的播放器，才算分流。
+     */
+    private fun voiceIsSeparate(): Boolean = synchronized(lock) {
+        streams.values.any { it.usage == AudioUsage.ASSISTANT }
     }
 
     /**

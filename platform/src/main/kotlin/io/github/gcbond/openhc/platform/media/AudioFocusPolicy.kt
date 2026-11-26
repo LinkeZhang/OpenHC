@@ -163,6 +163,15 @@ class AudioFocusPolicy(private val systemDucks: Boolean) {
     /** 语音助手在用：到这个时间还没报空闲就当空闲；null 表示空闲。 */
     private var assistantUntil: Long? = null
 
+    /**
+     * 语音助手的声音是不是单独走了一路（手机把提示与语音分流出来）。
+     *
+     * 只有分流时压低媒体才有意义：回答在独立的一路上，压住媒体那一路（音乐）才能听清回答。
+     * 不分流时提示音、音乐、回答全混在媒体一路发过来，压媒体等于把回答自己也压到 30%，
+     * 听起来就是「助手说话声音很小」（实测鸿蒙 NEXT 和 4.2 都不分流）。
+     */
+    private var assistantSeparate = false
+
     // ---------------- 输入 ----------------
 
     /**
@@ -318,10 +327,16 @@ class AudioFocusPolicy(private val systemDucks: Boolean) {
         return out
     }
 
-    /** 手机报语音助手状态：在用时媒体在本地压低，空闲后恢复。不申请焦点（助手出声时那一路自己会申请）。 */
-    fun assistantStateChanged(active: Boolean, nowMillis: Long): List<Command> {
+    /**
+     * 手机报语音助手状态：在用时媒体在本地压低，空闲后恢复。不申请焦点（助手出声时那一路自己会申请）。
+     *
+     * [separate] 表示助手的声音是不是单独走了一路（手机分流了「提示与语音」）。只有分流时才压低媒体：
+     * 不分流时回答就混在媒体那一路里，压低它等于把回答自己的音量调到 30%，听起来就是助手说话很小声。
+     */
+    fun assistantStateChanged(active: Boolean, nowMillis: Long, separate: Boolean = false): List<Command> {
         val out = ArrayList<Command>(1)
         assistantUntil = if (active) nowMillis + ASSISTANT_STATE_MAX_MILLIS else null
+        assistantSeparate = active && separate
         applyAll(out)
         update(nowMillis, out)
         return out
@@ -352,6 +367,7 @@ class AudioFocusPolicy(private val systemDucks: Boolean) {
         if (!keepCall) {
             callPhase = CallPhase.IDLE
             assistantUntil = null
+            assistantSeparate = false
         }
         for (slot in slots.values) {
             slot.sounding = 0
@@ -391,6 +407,7 @@ class AudioFocusPolicy(private val systemDucks: Boolean) {
         assistantUntil?.let { until ->
             if (nowMillis >= until) {
                 assistantUntil = null
+                assistantSeparate = false
                 applyAll(out)
             }
         }
@@ -458,7 +475,8 @@ class AudioFocusPolicy(private val systemDucks: Boolean) {
         if (slot.usage == AudioUsage.MEDIA) {
             if (callPhase != CallPhase.IDLE) {
                 level = Level.MUTED
-            } else if (assistantUntil != null && level == Level.NORMAL) {
+            } else if (assistantUntil != null && assistantSeparate && level == Level.NORMAL) {
+                // 只在助手的声音单独走一路时才压媒体。不分流时回答就混在这一路里，压下去等于压回答自己。
                 level = Level.DUCKED
             }
         }

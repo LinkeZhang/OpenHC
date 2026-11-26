@@ -400,15 +400,43 @@ class AudioFocusPolicyTest {
     fun theVoiceAssistantDucksMediaUntilIdleOrExpiry() {
         val policy = AudioFocusPolicy(systemDucks = true)
         policy.granted(policy.phoneRequested(media, 0), 0)
-        assertEquals(listOf<Command>(Command.Volume(media, Level.DUCKED)), policy.assistantStateChanged(true, 1_000))
-        assertEquals(listOf<Command>(Command.Volume(media, Level.NORMAL)), policy.assistantStateChanged(false, 5_000))
-        policy.assistantStateChanged(true, 6_000)
+        assertEquals(
+            listOf<Command>(Command.Volume(media, Level.DUCKED)),
+            policy.assistantStateChanged(true, 1_000, separate = true),
+        )
+        assertEquals(
+            listOf<Command>(Command.Volume(media, Level.NORMAL)),
+            policy.assistantStateChanged(false, 5_000, separate = true),
+        )
+        policy.assistantStateChanged(true, 6_000, separate = true)
         assertEquals(6_000 + AudioFocusPolicy.ASSISTANT_STATE_MAX_MILLIS, policy.nextDeadlineMillis)
         assertEquals(emptyList(), policy.onTick(35_999))
         assertEquals(listOf<Command>(Command.Volume(media, Level.NORMAL)), policy.onTick(36_000), "没报空闲也会自己恢复")
         // 通话静音比语音助手压低优先。
-        policy.assistantStateChanged(true, 40_000)
+        policy.assistantStateChanged(true, 40_000, separate = true)
         policy.callStateChanged(AudioFocusPolicy.CallPhase.RINGING, 40_100)
-        assertEquals(emptyList(), policy.assistantStateChanged(false, 40_200).filterIsInstance<Command.Volume>(), "通话中仍静音")
+        assertEquals(
+            emptyList(),
+            policy.assistantStateChanged(false, 40_200, separate = true).filterIsInstance<Command.Volume>(),
+            "通话中仍静音",
+        )
+    }
+
+    @Test
+    fun theVoiceAssistantDoesNotDuckMediaWhenThePhoneDoesNotSplitItOut() {
+        // 手机不分流时提示音、音乐、回答全混在媒体一路，压媒体等于把回答自己压到 30%：
+        // 实测鸿蒙 NEXT 和 4.2 都不分流，表现为「助手回答声音很小、点击的提示音正常」。
+        val policy = AudioFocusPolicy(systemDucks = true)
+        policy.granted(policy.phoneRequested(media, 0), 0)
+        assertEquals(
+            emptyList(),
+            policy.assistantStateChanged(true, 1_000, separate = false),
+            "不分流时不能压媒体，否则回答自己也变小",
+        )
+        assertEquals(
+            emptyList(),
+            policy.assistantStateChanged(false, 5_000, separate = false),
+            "本来就没压过，空闲也不用恢复",
+        )
     }
 }
