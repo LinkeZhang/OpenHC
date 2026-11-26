@@ -53,6 +53,33 @@ internal class AudioOutput(
     private val prefs = AudioPreferences(app)
     private val tuning: AudioTuning = prefs.playbackTuning()
 
+    /**
+     * 播视频时的音乐参数：**中等厚度**，兼顾音画同步和不断音。
+     *
+     * 不能直接用默认那套：默认起播 80ms、音轨 40ms，是给「纯听音乐、延迟越低越好」准备的。
+     * 无线链路抖动比这大，缓冲薄到 80ms 会频繁欠载、重新起播，听起来声音抢在画面前面，
+     * 而且欠载重建会占着低延迟输出路径，和视频解码抢 CPU，画面跟着卡。
+     *
+     * 也不能用纯音乐的厚缓冲（无线还要再多垫 [WIRELESS_CUSHION_MILLIS]）：总延迟接近一秒，
+     * 就是音画不同步。这里取中间值，并且**不申请低延迟输出**，让系统用普通缓冲，抗抖动更稳。
+     *
+     * 数值沿用 android4 分支实测调出来的一套（那边在安卓 5.1 车机上验证过）。
+     */
+    private val videoTuning: AudioTuning = prefs.playbackTuning().let {
+        AudioTuning(
+            startMillis = 250,
+            targetMillis = 350,
+            maxMillis = 800,
+            trackMillis = 150,
+            startWindowMillis = 0,
+            trimHoldMillis = 600_000,
+            extraDelayMillis = it.extraDelayMillis,
+            lowLatency = false,
+            mediaStream = it.mediaStream,
+            navigationStream = it.navigationStream,
+        )
+    }
+
     /** 抓包到第一次有音频回调时才建（没声明扬声器、手机没要声音的连接不用开线程和文件）。 */
     private var capture: AudioCapture? = null
 
@@ -333,10 +360,16 @@ internal class AudioOutput(
         }
         val usage = usageOf(packet.route)
         val stream = Stream(key, usage)
-        // 播视频时音乐不垫：垫下去就是一秒的音画不同步。纯听音乐时垫（无线还要再多垫一点）。
+        // 播视频时音乐用专门的中等厚度参数（[videoTuning]）：默认那套太薄会欠载抢拍，
+        // 纯音乐那套太厚又差一秒。纯听音乐时照旧，无线再多垫一点。
         val videoThin = videoActive && usage == AudioUsage.MEDIA
         val cushioned = wireless && !videoThin && (usage == AudioUsage.MEDIA || usage == AudioUsage.NAVIGATION)
-        stream.player = AudioPlayer(format, stream, if (cushioned) tuning.withCushion(WIRELESS_CUSHION_MILLIS) else tuning, usage)
+        val chosen = when {
+            videoThin -> videoTuning
+            cushioned -> tuning.withCushion(WIRELESS_CUSHION_MILLIS)
+            else -> tuning
+        }
+        stream.player = AudioPlayer(format, stream, chosen, usage)
         volumes[usage]?.let { stream.player.setVolume(it) }
         streams[key] = stream
         Log.i(

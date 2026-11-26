@@ -50,8 +50,8 @@ android {
         // 400 起：合并上游 0.3.0——本分支相对上游只剩「下探到安卓 6.0」（旧接口开热点、蓝牙地址多路探测、
         // 设置页自动读取本机蓝牙地址）和诊断日志导出的增强。
         // 此前 main 是 308（上游 0.2.7 衍生版）、android4 分支是 40210。
-        versionCode = 401
-        versionName = "0.3.1-android6"
+        versionCode = 402
+        versionName = "0.3.2-android6"
     }
 
     sourceSets {
