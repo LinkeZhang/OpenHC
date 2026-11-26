@@ -1,5 +1,40 @@
 # 更新记录
 
+## 0.3.0-android4（2026-11-27）把主线 0.3.0 能用的更新搬过来，版本号跟到上游
+
+主线合并上游 0.3.0 之后多了不少改动。这一版把其中**跟车机系统版本无关、安卓 4.1～7.x 上照样有用**的部分搬到本分支。
+界面重做（主线用 Compose，本分支是原生 View）和「经车机网络 ADB 开热点 / 暂停搜 WiFi」这类新功能没有搬，
+本分支的安卓 4 适配、蓝牙地址多路探测、车机主动回连、诊断日志导出都原样保留。
+
+**一、车机蓝牙地址多认一个系统属性。** 上游 0.3.0 发现德赛西威一类车机把本机蓝牙地址写在
+`persist.vehicle.bt.mac_addr`（普通应用可读），本分支原来只试自己那份 18 个属性的清单。现在这个属性也加进去了，
+放在第二位（仅次于 `persist.sys.bt_addr`），老车机上读不到地址的情况会少一些。
+
+**二、手机当场拒绝回连时不再干等两分钟。** 车机拨通手机后，如果手机上已经删了这辆车，手机收到「开认证子通道」
+的请求不到 1 秒就回拒绝、什么都不弹。原来车机会把它当成「手机在弹框问用户要不要关热点」，留着控制通道等确认最多
+2 分钟，期间一直重问。现在 3 秒内被拒算「当场拒绝」，立刻结束并提示「这台手机不认这台车机了，请重新扫码配对」；
+手机真的在弹框问用户时约 10 秒后才回拒绝，照旧等确认、照旧重问。
+
+**三、插线优先：真插上了手机就先用有线。** 界面开着时插上华为 / 荣耀手机、或者回到界面时手机正插着，只要
+「拔线重插」的闸门开着（不是手机切换模式时的重新枚举），就开始有线。无线还在等手机（扫码等待、等回连、车机在拨）
+时让给有线；手机已经连上无线时不管插线（多半是在充电），不会把无线断掉。手机插着却没在连时（点过停止、
+还没同意 VPN 授权），首页多一个「连接插着的手机」按钮。用户在手机插着时点了「停止」，这次插入不再自动开始。
+
+**四、改了要重新连接才生效的设置，回首页时提醒。** 进设置页时记下画面、方向盘按键、车机蓝牙地址、声音、
+无线方式和车机热点这些「下次连接才生效」的项，回首页时对比。有连接正用着旧设置（已经连上，或者已经开始、
+还在等手机）时弹框列出改了哪几项，说明要停止后重新连接才生效；没在连接时不提醒；只影响无线的项在只有有线连接时
+不提醒。
+
+- app：`BluetoothAddressPolicy.PROPERTY_KEYS` 加 `persist.vehicle.bt.mac_addr`。
+- core:session：`WirelessReceiverSession` 记下请求认证子通道的时间，`QUICK_DECLINE_MILLIS`（3 秒）内被拒直接以
+  `ReconnectFailed(needsPairing = true)` 结束，不再排重问。
+- app：`ConnectionController` 加 `stoppedWhilePlugged`、`checkPlug`、`startIfPlugged`、`phonePlugged`；
+  `ReconnectPolicy.phoneOnWireless`；`WirelessController.yieldToWired(plugged)`、`yieldWaiting(anyKind)`；
+  `MainActivity` 新增 `StartKind.PLUGGED`；首页 `HomeActions.phonePlugged` 与「连接插着的手机」按钮。
+- app：新增 `settings/ReconnectReminder.kt`（`PendingSetting`、`ReconnectReminder.changed`），`MainActivity`
+  进出设置页时取快照、对比、弹框。
+- 版本号 40300 / 0.3.0-android4（跟上游 0.3.0；号段仍在 4xxxx，能和主线 400 互相覆盖安装）。
+
 ## 0.2.11-android4（2026-11-26）握手超时不再猜：带上收发统计，并自动换加密链路再试一次
 
 安卓 4.4 车机（系统 19）上的诊断日志显示，车机主动连手机这条路**链路是通的**（连上之后 `PhoneBluetoothConnected`

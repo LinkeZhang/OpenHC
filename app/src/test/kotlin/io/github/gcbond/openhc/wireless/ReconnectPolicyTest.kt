@@ -171,4 +171,18 @@ class ReconnectPolicyTest {
         // 用户点开始的扫码连接照旧挡。
         assertTrue(ReconnectPolicy.blocksWired(run(WirelessSignal.AttemptStarted(3), WirelessSignal.Wireless(WirelessEvent.PairingReady(qr, "135790")))))
     }
+
+    @Test
+    fun phoneOnWirelessOnlyWhenPhoneAlreadyConnected() {
+        // 插线优先：手机还没经蓝牙连上无线（扫码等待、车机在拨）时不算「手机在无线里」，插线可以让无线让出；
+        // 手机已经连上（正在连、投屏中）就不管插线（多半是在充电），无线照常用。
+        val qr = "x"
+        fun run(vararg signals: WirelessSignal) = signals.fold(WirelessUiState()) { s, sig -> WirelessReducer.reduce(s, sig) }
+
+        assertFalse(ReconnectPolicy.phoneOnWireless(WirelessUiState()), "空闲：没有无线在用")
+        val waiting = run(WirelessSignal.AttemptStarted(1, autoReconnect = true), WirelessSignal.Wireless(WirelessEvent.PairingReady(qr, "135790")))
+        assertFalse(ReconnectPolicy.phoneOnWireless(waiting), "等扫码：手机还没连上，插线优先")
+        val connected = WirelessReducer.reduce(waiting, WirelessSignal.Wireless(WirelessEvent.PhoneBluetoothConnected("02:00:00:00:00:01")))
+        assertTrue(ReconnectPolicy.phoneOnWireless(connected), "手机已连上无线：插线不管")
+    }
 }

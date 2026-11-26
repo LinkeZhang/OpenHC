@@ -164,6 +164,9 @@ class WirelessController(
     /** 有线要不要因为无线而不开始：扫码等待里手机还没连上时不挡（有线来了就让出）。 */
     val blocksWired: Boolean get() = ReconnectPolicy.blocksWired(state.value)
 
+    /** 手机已经经蓝牙连上无线（正在连、投屏中）：这时插线不算数（多半是在充电），无线照常用。 */
+    val phoneOnWireless: Boolean get() = ReconnectPolicy.phoneOnWireless(state.value)
+
     /** 自动回连排着下一次等待（两次等待之间）：前台服务的通知据此显示「正在等已配对的手机回连」。 */
     @Volatile
     var autoRetryPending: Boolean = false
@@ -307,8 +310,8 @@ class WirelessController(
     }
 
     /** 有线马上要开始：手机还没连上的等待先让出；有线没真的开始（例如没给授权）时过一会儿回到等待。 */
-    fun yieldToWired() = post {
-        yieldWaiting("有线要开始")
+    fun yieldToWired(plugged: Boolean = false) = post {
+        yieldWaiting(if (plugged) "插上了手机" else "有线要开始", anyKind = plugged)
     }
 
     /** 从设置页回来：设置可能改了（例如刚打开「自动连接手机」），照界面回到前台一样看要不要拨。 */
@@ -858,11 +861,12 @@ class WirelessController(
     /** 这次连接还在等手机经蓝牙连上（没在收尾）。 */
     private fun isWaiting(current: Attempt): Boolean = !current.phoneSeen && !current.tearingDown
 
-    /** 让出还在等手机的自动等待；让了返回 true。 */
-    private fun yieldWaiting(why: String): Boolean {
+    /** 让出还在等手机的无线连接：默认只让自动进入的等回连，[anyKind] 时扫码等待、车机在拨也让；让了返回 true。 */
+    private fun yieldWaiting(why: String, anyKind: Boolean = false): Boolean {
         val current = attempt ?: return false
-        if (current.kind != Kind.AUTO || !isWaiting(current)) return false
-        Log.i(TAG, "$why，停止等已配对的手机回连，让给有线")
+        if (!anyKind && current.kind != Kind.AUTO) return false
+        if (!isWaiting(current)) return false
+        Log.i(TAG, "$why，停止第 ${current.id} 次无线连接（${current.kind}，手机还没连上），让给有线")
         current.stopReason = StopReason.YIELD
         current.causes.onUserStop()
         apply(WirelessSignal.StopRequested)

@@ -37,6 +37,8 @@ object BluetoothAddressPolicy {
      */
     val PROPERTY_KEYS = listOf(
         "persist.sys.bt_addr",
+        // 德赛西威一类车机把地址写在这里，普通应用可读。老车机上这类平台不少，放在前面优先试。
+        "persist.vehicle.bt.mac_addr",
         "persist.vendor.bt.bdaddr",
         "persist.bluetooth.bdaddr",
         "ro.bt.bdaddr_path_addr",

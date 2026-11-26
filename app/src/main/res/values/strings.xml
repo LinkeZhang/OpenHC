@@ -15,6 +15,12 @@
     <string name="row_help_hidden">已收起</string>
     <string name="action_show_projection">回到投屏画面</string>
     <string name="action_retry_now">立即重试</string>
+    <string name="action_connect_plugged">连接插着的手机</string>
+    <!-- 设置改了、但要重新连接才生效（回首页时提醒） -->
+    <string name="settings_reconnect_reminder_title">这些改动要重新连接才生效</string>
+    <string name="settings_reconnect_reminder_message">当前连接还在按改动前的设置，改了的项：\n%1$s\n\n要生效请先「停止」，再重新连接。</string>
+    <string name="settings_reconnect_reminder_projection">投屏中也能改，但要断开重连才按新设置走。</string>
+    <string name="settings_reconnect_reminder_ok">知道了</string>
     <string name="action_grant_vpn">去授权</string>
     <string name="action_reset_trust">清除配对记录并重试</string>
     <string name="action_save">保存</string>

@@ -855,7 +855,8 @@ class WirelessReceiverSessionTest {
         d.startReconnect()
         d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
-        // 手机暂时拒绝（例如在问用户要不要关热点）：不结束，控制通道留着。
+        // 手机暂时拒绝（例如在问用户要不要关热点，约 10 秒后才回）：不结束，控制通道留着。
+        d.now += 10_000
         assertEquals(listOf("event ReconnectAwaitingPhone(状态=1)"), d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no"))
         // 手机自己来请求之前，重问的定时还没到：什么也不发。
         assertTrue(d.tick(d.now + d.config.timeouts.reconnectRetryMillis - 1).isEmpty())
@@ -880,6 +881,8 @@ class WirelessReceiverSessionTest {
         d.startReconnect()
         d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
+        // 手机弹框问了用户、约 10 秒后才拒绝：不是「当场拒绝」，照旧等确认并重问。
+        d.now += 10_000
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
         // 到点再问一次：重发命令 3，手机又拒（照样是「等手机」）。
         val retryAt = d.now + d.config.timeouts.reconnectRetryMillis
@@ -888,6 +891,8 @@ class WirelessReceiverSessionTest {
             d.tick(retryAt).filterNot { it == "diag" },
         )
         assertTrue(d.layers.calls.contains("bt.repeatAuthChannelRequest"))
+        // 重问之后手机仍然是「弹框问过、隔一会儿才拒」，继续等。
+        d.now += 10_000
         assertEquals(listOf("event ReconnectAwaitingPhone(状态=1)"), d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no"))
         // 总时限从第一次被拒算起，重问不往后推。
         d.tick(d.now + d.config.timeouts.reconnectConfirmMillis)
@@ -903,10 +908,12 @@ class WirelessReceiverSessionTest {
         d.startReconnect()
         d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
+        d.now += 10_000
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
-        // 一直拒：每 8 秒重问一次，问满 5 次就不再问，只等手机自己来。
+        // 一直拒（每次都是弹框问过、隔 10 秒才拒）：每 8 秒重问一次，问满 5 次就不再问，只等手机自己来。
         repeat(5) {
             d.tick(d.now + d.config.timeouts.reconnectRetryMillis)
+            d.now += 10_000
             d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
         }
         val asked = d.layers.calls.count { it == "bt.repeatAuthChannelRequest" }
@@ -916,11 +923,42 @@ class WirelessReceiverSessionTest {
     }
 
     @Test
+    fun reconnectQuickDeclineEndsAtOnceAsNeedsPairing() {
+        // 手机上删了这辆车：请求发出去 0.2 秒就回拒绝、什么都不弹。不该再等 2 分钟、也不该重问。
+        val d = Driver()
+        d.startReconnect()
+        d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
+        d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
+        d.now += 200
+        val out = d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
+        assertTrue(out.none { it.startsWith("event ReconnectAwaitingPhone") }, out.toString())
+        val reason = assertIs<WirelessEndReason.ReconnectFailed>(d.ended())
+        assertEquals("手机当场拒绝了（状态 1，多半是手机上删了这辆车）", reason.detail)
+        assertTrue(reason.needsPairing)
+        // 已经结束了，不会再排重问。
+        assertTrue(d.tick(d.now + d.config.timeouts.reconnectRetryMillis).isEmpty())
+        assertEquals(0, d.layers.calls.count { it == "bt.repeatAuthChannelRequest" })
+    }
+
+    @Test
+    fun reconnectSlowDeclineStillWaitsForUser() {
+        // 手机弹框问用户（要不要关热点）约 10 秒后才回拒绝：这是「等确认」，不能当成当场拒绝直接结束。
+        val d = Driver()
+        d.startReconnect()
+        d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
+        d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
+        d.now += WirelessReceiverSession.QUICK_DECLINE_MILLIS
+        assertEquals(listOf("event ReconnectAwaitingPhone(状态=1)"), d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no"))
+        assertTrue(d.outputs.none { it is WirelessEvent.Ended })
+    }
+
+    @Test
     fun reconnectDeclinedEndsWhenPhoneClosesControl() {
         val d = Driver()
         d.startReconnect()
         d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "hs")
+        d.now += 10_000
         d.btData(WirelessChannel.BLUETOOTH_CONTROL, "cmd4-no")
         d.btClosed(WirelessChannel.BLUETOOTH_CONTROL)
         assertEquals("手机没同意（关了连接）", assertIs<WirelessEndReason.ReconnectFailed>(d.ended()).detail)

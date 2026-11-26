@@ -127,6 +127,9 @@ class WirelessReceiverSession internal constructor(
     /** 主动回连：手机暂时拒绝过、正在等手机上的确认。 */
     private var awaitingPhone = false
 
+    /** 主动回连：最近一次请手机开认证子通道的时间（判断「当场拒绝」用）。 */
+    private var authRequestedAt = 0L
+
     /** 主动回连：上次被拒之后隔多久再请手机开一次认证子通道；null 表示不再重问。 */
     private var reconnectRetryDeadline: Long? = null
 
@@ -639,6 +642,7 @@ class WirelessReceiverSession internal constructor(
         val target = checkNotNull(reconnect)
         val layer = checkNotNull(nearby)
         reconnectDeadline = nowMillis + config.timeouts.reconnectAnswerMillis
+        authRequestedAt = nowMillis
         handleBluetooth(call(WirelessStep.BLUETOOTH) { layer.requestAuthChannel(target.tag) }, nowMillis, out)
     }
 
@@ -672,10 +676,23 @@ class WirelessReceiverSession internal constructor(
      *
      * 为什么要重问：实车（2026-11-25，安卓 5.1 车机 + 华为手机）上手机拒了一次之后就一直在等车机再问，
      * 以前车机只干等 120 秒，到点报「手机上一直没确认」——而手机从头到尾没弹过任何框。
+     *
+     * 例外：手机在 [QUICK_DECLINE_MILLIS] 内就拒绝，说明它没弹框、直接不认这辆车（实车 2026-11：手机上删了这辆车后
+     * 约 0.2 秒就回拒绝，什么都不弹）。这种「当场拒绝」等确认等不来，重问也只会一次次被当场拒，所以直接以
+     * [WirelessEndReason.ReconnectFailed]（needsPairing）结束，让界面提示重新配对；手机弹框问用户时约 10 秒后才回
+     * 拒绝，照旧留着控制通道等确认并重问。
      */
     private fun onReconnectDeclined(status: Int, nowMillis: Long, out: Out) {
         if (reconnect == null || authConn != null) {
             diag(SessionLayer.SESSION, "认证子通道已经有了，不理手机的拒绝（状态 $status）", out)
+            return
+        }
+        if (authRequestedAt != 0L && nowMillis - authRequestedAt < QUICK_DECLINE_MILLIS) {
+            diag(SessionLayer.SESSION, "手机当场拒绝了（${nowMillis - authRequestedAt} 毫秒内回状态 $status），不重问", out)
+            finish(
+                WirelessEndReason.ReconnectFailed("手机当场拒绝了（状态 $status，多半是手机上删了这辆车）", needsPairing = true),
+                nowMillis, out,
+            )
             return
         }
         awaitingPhone = true
@@ -1003,9 +1020,15 @@ class WirelessReceiverSession internal constructor(
     override fun toString() =
         "WirelessReceiverSession(已结束=$ended, 认证=$authSucceeded, 频率=$negotiatedFrequency, WiFi 已接上=$phoneOnWifi)"
 
-    private companion object {
+    internal companion object {
         /** 被拒之后最多再请手机开几次认证子通道：8 秒一次，约 40 秒内问 5 次，之后只等手机自己来。 */
         const val MAX_RECONNECT_RETRIES = 5
+
+        /**
+         * 手机在这么短的时间里就拒绝开认证子通道，算「当场拒绝」（没弹框，直接不认这辆车）。
+         * 手机开着热点、弹框问用户时约 10 秒后才回拒绝；不认这辆车时不到 1 秒（实车 2026-11）。
+         */
+        const val QUICK_DECLINE_MILLIS = 3_000L
 
         fun describe(e: Throwable): String = e.javaClass.simpleName + (e.message?.let { "：$it" } ?: "")
     }

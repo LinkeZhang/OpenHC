@@ -102,7 +102,13 @@ class BluetoothAddressPolicyTest {
     @Test
     fun propertyKeysCoverCommonVendors() {
         assertEquals(BluetoothAddressPolicy.SYSTEM_PROPERTY_KEY, BluetoothAddressPolicy.PROPERTY_KEYS.first())
-        for (key in listOf("persist.sys.bt_addr", "persist.vendor.bt.bdaddr", "ro.bt.bdaddr")) {
+        for (key in listOf(
+            "persist.sys.bt_addr",
+            // 上游 0.3.0 新增：德赛西威一类车机把地址写在这里，普通应用可读。
+            "persist.vehicle.bt.mac_addr",
+            "persist.vendor.bt.bdaddr",
+            "ro.bt.bdaddr",
+        )) {
             assertEquals(true, key in BluetoothAddressPolicy.PROPERTY_KEYS, key)
         }
         assertEquals(BluetoothAddressPolicy.PROPERTY_KEYS.size, BluetoothAddressPolicy.PROPERTY_KEYS.distinct().size, "不能有重复")

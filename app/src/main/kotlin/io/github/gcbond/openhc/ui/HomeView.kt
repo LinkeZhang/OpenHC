@@ -25,6 +25,8 @@ internal class HomeActions(
     val onRetryNow: () -> Unit,
     val onGrantVpn: () -> Unit,
     val onResetTrustStore: () -> Unit,
+    /** 车机上插着手机没在连（点过停止、还没同意 VPN 授权）：给出「连接插着的手机」。 */
+    val phonePlugged: () -> Boolean = { false },
 )
 
 /** 首页左栏「无线连接」上的操作。 */
@@ -458,7 +460,13 @@ internal class HomeView(context: Context) : ScrollView(context) {
             when (state.notice) {
                 Notice.VpnConsentRequired -> add(context.getString(R.string.action_grant_vpn), true, onClick = actions.onGrantVpn)
                 is Notice.TrustStoreCorrupt -> add(context.getString(R.string.action_reset_trust), true, onClick = actions.onResetTrustStore)
-                else -> add(context.getString(R.string.action_start), true, enabled = identityLoaded, onClick = actions.onStart)
+                else -> {
+                    add(context.getString(R.string.action_start), true, enabled = identityLoaded, onClick = actions.onStart)
+                    // 手机已经插着却没在连（点过停止、或还没同意 VPN 授权）：给一个直接连它的按钮。
+                    if (actions.phonePlugged()) {
+                        add(context.getString(R.string.action_connect_plugged), false, enabled = identityLoaded, onClick = actions.onStart)
+                    }
+                }
             }
         } else {
             if (state.phase == Phase.PROJECTING) {

@@ -25,7 +25,12 @@ import io.github.gcbond.openhc.platform.net.VpnConsent
 import io.github.gcbond.openhc.projection.ProjectionView
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
+import io.github.gcbond.openhc.settings.ClarityPreferences
 import io.github.gcbond.openhc.settings.LogExport
+import io.github.gcbond.openhc.settings.MediaKeyPreferences
+import io.github.gcbond.openhc.settings.PendingSetting
+import io.github.gcbond.openhc.settings.ReconnectReminder
+import io.github.gcbond.openhc.settings.WirelessPreferences
 import io.github.gcbond.openhc.startup.BootStart
 import io.github.gcbond.openhc.startup.BootStartPolicy
 import io.github.gcbond.openhc.ui.HomeActions
@@ -51,12 +56,19 @@ import kotlinx.coroutines.launch
  */
 class MainActivity : Activity() {
 
-    private enum class StartKind { START, USB_ATTACHED, BOOT }
+    /**
+     * 开始有线的来由。START：点了按钮；BOOT：开机等插线；USB_ATTACHED：系统按「设备接入」拉起（闸门关着的重新枚举也会来）；
+     * PLUGGED：确认真插上了手机（界面开着时的设备接入、或回到前台时手机插着），插线优先。
+     */
+    private enum class StartKind { START, USB_ATTACHED, BOOT, PLUGGED }
 
     private enum class Screen { HOME, SETTINGS, PROJECTION }
 
     private lateinit var settings: AppSettings
     private var pendingStart: StartKind? = null
+
+    /** 进设置页时「下次连接才生效」各项的值；回首页时对比，正在进行的连接用不上的改动弹框提醒。 */
+    private var settingsOnEntry: Map<PendingSetting, String>? = null
 
     private val controller: ConnectionController get() = (application as OpenHcApp).connection
     private val wireless: WirelessController get() = (application as OpenHcApp).wireless
@@ -163,6 +175,7 @@ class MainActivity : Activity() {
                 onRetryNow = { controller.retryNow() },
                 onGrantVpn = { requestStart(StartKind.START) },
                 onResetTrustStore = { controller.resetTrustStoreAndStart() },
+                phonePlugged = { controller.phonePlugged() },
             ),
             wirelessActions = WirelessActions(
                 onStart = { wirelessStart.start() },
@@ -174,7 +187,7 @@ class MainActivity : Activity() {
                         renderCurrent()
                     }
                 },
-                onOpenSettings = { screen = Screen.SETTINGS; renderCurrent() },
+                onOpenSettings = ::openSettings,
                 onOpenAppSettings = { wirelessStart.openAppSettings() },
                 onEnableBluetooth = { wirelessStart.requestEnableBluetooth() },
                 onResetTrustStore = { wireless.resetTrustStoreAndStart() },
@@ -186,9 +199,94 @@ class MainActivity : Activity() {
                     renderCurrent()
                 }
             },
-            onOpenSettings = { screen = Screen.SETTINGS; renderCurrent() },
+            onOpenSettings = ::openSettings,
         )
         setContent(view)
+    }
+
+    /** 打开设置页：先记下「下次连接才生效」各项此刻的值，回来时对比。 */
+    private fun openSettings() {
+        settingsOnEntry = pendingSettingsSnapshot()
+        screen = Screen.SETTINGS
+        renderCurrent()
+    }
+
+    /**
+     * 从设置页回首页：有连接正用着旧设置（已经连上，或者已经开始、还在等手机）时，把改了、但要重新连接才生效的项列出来
+     * 提醒一下；没在连接时下一次连接自然按新设置，不提醒。
+     */
+    private fun closeSettings() {
+        val before = settingsOnEntry
+        settingsOnEntry = null
+        wireless.onSettingsClosed()
+        screen = Screen.HOME
+        renderCurrent()
+        if (before == null) return
+        val app = application as OpenHcApp
+        val wired = app.connection.state.value
+        val w = app.wireless.state.value
+        val changed = ReconnectReminder.changed(
+            before,
+            pendingSettingsSnapshot(),
+            wiredActive = ReconnectReminder.wiredUsesOldSettings(wired.phase),
+            wirelessActive = ReconnectReminder.wirelessUsesOldSettings(w.phase),
+        )
+        if (changed.isNotEmpty()) showReconnectReminder(changed, w.phase == WirelessPhase.PROJECTING)
+    }
+
+    /** 「下次连接才生效」各项的当前值。键和设置页上显示的名字对得上。 */
+    private fun pendingSettingsSnapshot(): Map<PendingSetting, String> {
+        val audio = AudioPreferences(this)
+        val wirelessPrefs = WirelessPreferences(this)
+        return PendingSetting.values().associateWith { key ->
+            when (key) {
+                PendingSetting.FPS -> settings.fps.toString()
+                PendingSetting.UI_SCALE -> settings.uiScalePercent.toString()
+                PendingSetting.CLARITY -> ClarityPreferences(this).clarity.name
+                PendingSetting.FULL_SCREEN -> settings.fullScreen.toString()
+                PendingSetting.MEDIA_KEYS -> MediaKeyPreferences(this).enabled.toString()
+                PendingSetting.BLUETOOTH_ADDRESS -> settings.manualBluetoothAddress.orEmpty()
+                PendingSetting.AUDIO_ENABLED -> audio.enabled.toString()
+                PendingSetting.AUDIO_DELAY -> audio.delayMillis.toString()
+                PendingSetting.NAVIGATION_STREAM -> audio.navigationStream.toString()
+                PendingSetting.MEDIA_STREAM -> audio.mediaStream.toString()
+                PendingSetting.WIRELESS_MODE -> wirelessPrefs.carHotspot.toString()
+                PendingSetting.CAR_HOTSPOT_NAME -> wirelessPrefs.carHotspotName
+                PendingSetting.CAR_HOTSPOT_PASSWORD -> wirelessPrefs.carHotspotPassword
+                PendingSetting.CAR_HOTSPOT_BAND -> wirelessPrefs.carHotspotFiveGhz.toString()
+            }
+        }
+    }
+
+    /** 设置页上这一项的名字。 */
+    private fun PendingSetting.label(): Int = when (this) {
+        PendingSetting.FPS -> R.string.settings_fps
+        PendingSetting.UI_SCALE -> R.string.settings_ui_scale
+        PendingSetting.CLARITY -> R.string.settings_clarity
+        PendingSetting.FULL_SCREEN -> R.string.settings_full_screen
+        PendingSetting.MEDIA_KEYS -> R.string.settings_media_keys
+        PendingSetting.BLUETOOTH_ADDRESS -> R.string.settings_bt
+        PendingSetting.AUDIO_ENABLED -> R.string.settings_audio_enabled
+        PendingSetting.AUDIO_DELAY -> R.string.settings_audio_delay
+        PendingSetting.NAVIGATION_STREAM -> R.string.settings_audio_navigation_stream
+        PendingSetting.MEDIA_STREAM -> R.string.settings_audio_media_stream
+        // android4 分支没有 main 的三种无线方式，只有「车机自带热点」一个开关，名字用它的。
+        PendingSetting.WIRELESS_MODE -> R.string.settings_car_hotspot
+        PendingSetting.CAR_HOTSPOT_NAME -> R.string.settings_car_hotspot_name
+        PendingSetting.CAR_HOTSPOT_PASSWORD -> R.string.settings_car_hotspot_password
+        PendingSetting.CAR_HOTSPOT_BAND -> R.string.settings_car_hotspot_5g
+    }
+
+    /** 列出改了、但要重新连接才生效的项。 */
+    private fun showReconnectReminder(changed: List<PendingSetting>, projecting: Boolean) {
+        val names = changed.joinToString("\n") { "· " + getString(it.label()) }
+        val message = getString(R.string.settings_reconnect_reminder_message, names) +
+            if (projecting) "\n\n" + getString(R.string.settings_reconnect_reminder_projection) else ""
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.settings_reconnect_reminder_title)
+            .setMessage(message)
+            .setPositiveButton(R.string.settings_reconnect_reminder_ok, null)
+            .show()
     }
 
     private fun showSettings() {
@@ -286,6 +384,9 @@ class MainActivity : Activity() {
             if (bar > 0) io.github.gcbond.openhc.connection.DisplayArea.measuredNavigationBarHeight = bar
         }
         wireless.onAppForeground()
+        // 回到前台时手机插着、没在连接、也没在这次插入上点过停止：当作刚插上（插线优先）。
+        // 还没同意过 VPN 授权时不自动弹授权框（拒绝后每次回到前台都会弹），等用户点首页的按钮。
+        controller.startIfPlugged { if (VpnConsent.isGranted(this)) requestStart(StartKind.PLUGGED) }
     }
 
     override fun onPause() {
@@ -318,11 +419,7 @@ class MainActivity : Activity() {
     @SuppressLint("GestureBackNavigation")
     override fun onBackPressed() {
         when (screen) {
-            Screen.SETTINGS -> {
-                wireless.onSettingsClosed()
-                screen = Screen.HOME
-                renderCurrent()
-            }
+            Screen.SETTINGS -> closeSettings()
             Screen.PROJECTION -> {
                 screen = Screen.HOME
                 renderCurrent()
@@ -359,11 +456,17 @@ class MainActivity : Activity() {
         // 被「设备接入」拉起，说明用户在系统框里同意过用本应用打开手机：之后有线会话先等系统自动授权。
         settings.usbAttachAccepted = true
         Log.i(TAG, "插线拉起")
-        requestStart(StartKind.USB_ATTACHED)
+        // 这次「接入」是不是真的插上了手机（不是手机切换模式时的重新枚举）：真插上了就插线优先，让无线让出。
+        controller.checkPlug { real ->
+            if (real) requestStart(StartKind.PLUGGED) else requestStart(StartKind.USB_ATTACHED)
+        }
     }
 
     private fun requestStart(kind: StartKind) {
-        if (wireless.blocksWired) {
+        // 真插上了手机（插线优先）：手机已经经蓝牙连上无线就不管插线（多半是在充电），无线照常用；
+        // 还在等手机（扫码、等回连、车机在拨）就让给有线。其它来由（点开始、开机等插线）照原规则：无线在进行就不开始。
+        val blocked = if (kind == StartKind.PLUGGED) wireless.phoneOnWireless else wireless.blocksWired
+        if (blocked) {
             // 两种连接同时只能有一种：插线拉起时只记一笔，用户点开始时给出原因。
             Log.i(TAG, "无线连接正在进行，不开始有线连接（$kind）")
             if (kind == StartKind.START) {
@@ -455,11 +558,11 @@ class MainActivity : Activity() {
     }
 
     private fun dispatch(kind: StartKind) {
-        // 无线在被动等已配对的手机回连的话先让出。
-        wireless.yieldToWired()
+        // 无线在等手机的话先让出：真插上了手机（插线优先）时扫码等待、车机在拨也让；其它来由只让自动进入的等回连。
+        wireless.yieldToWired(plugged = kind == StartKind.PLUGGED)
         when (kind) {
             StartKind.START, StartKind.BOOT -> controller.start()
-            StartKind.USB_ATTACHED -> controller.onUsbAttached()
+            StartKind.USB_ATTACHED, StartKind.PLUGGED -> controller.onUsbAttached()
         }
     }
 
