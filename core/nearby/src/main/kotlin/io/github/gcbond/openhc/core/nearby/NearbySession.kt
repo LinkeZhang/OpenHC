@@ -92,6 +92,32 @@ class NearbySession(
     /** 下次希望 [onTick] 被调用的时间（单调时钟毫秒）；没有待到期的定时时为 null。 */
     val nextTickAtMillis: Long? get() = deadline
 
+    /** 收到、发出的字节数和帧数（诊断用；车机读不到 logcat，超时时要把这些写进诊断文件）。 */
+    private var receivedBytes = 0L
+    private var receivedFrames = 0L
+    private var sentFrames = 0L
+
+    /**
+     * 握手进度的一句话说明，用于诊断：收发了多少字节多少帧、三样握手要素见到了哪些。
+     *
+     * 为什么要有它：实车（安卓 4.4 车机 + 华为手机，车机主动回连）上出现过「连得上、5 秒内一个字节没回」，
+     * 光看「握手没完成」分不清是手机没发数据、发了但拼不出帧、还是只缺某一项。
+     */
+    val handshakeProgress: String
+        get() {
+            val missing = buildList {
+                if (seen and SEEN_VERSION == 0) add("版本")
+                if (seen and SEEN_SUMMARY == 0) add("摘要")
+                if (seen and SEEN_ENCRYPTION == 0) add("加密")
+            }
+            return buildString {
+                append("收到 ").append(receivedBytes).append(" 字节 / ").append(receivedFrames).append(" 帧")
+                append("，发出 ").append(sentFrames).append(" 帧")
+                append("，握手").append(if (missing.isEmpty()) "三项都齐了" else "还缺 ${missing.joinToString("、")}")
+                if (decoder.buffered > 0) append("，另有 ").append(decoder.buffered).append(" 字节还没拼成帧")
+            }
+        }
+
     /**
      * 控制连接建立后立刻调用：发明文的 connectId（tag 15），并开始握手计时。
      * 车机是应答方时（有线、手机连上来的蓝牙通道）不主动发版本、摘要、加密请求，等手机发。
@@ -120,6 +146,7 @@ class NearbySession(
     fun feed(data: ByteArray, offset: Int = 0, length: Int = data.size - offset): List<NearbyAction> {
         check(started) { "先调用 start" }
         if (closed) return emptyList()
+        receivedBytes += length
         decoder.feed(data, offset, length)
         val out = ArrayList<NearbyAction>()
         while (true) {
@@ -130,6 +157,7 @@ class NearbySession(
                 out.add(NearbyEvent.InputDiscarded(e.message ?: "拆帧失败", pending))
                 null
             } ?: break
+            receivedFrames++
             handleFrame(frame, out)
         }
         return out
@@ -142,7 +170,7 @@ class NearbySession(
         deadline = null
         closed = true
         decoder.clear()
-        return listOf(NearbyEvent.HandshakeTimedOut)
+        return listOf(NearbyEvent.HandshakeTimedOut(handshakeProgress))
     }
 
     /**
@@ -497,6 +525,7 @@ class NearbySession(
         } else {
             NearbyFrame.plain(outerType, payload)
         }
+        sentFrames++
         out.add(NearbyAction.Send(frame.encode()))
     }
 

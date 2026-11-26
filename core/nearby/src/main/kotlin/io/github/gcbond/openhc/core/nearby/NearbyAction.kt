@@ -37,8 +37,13 @@ sealed class NearbyEvent : NearbyAction {
     /**
      * 连接建立后 [NearbySession.HANDSHAKE_TIMEOUT_MILLIS] 内握手没完成。会话已作废，
      * 之后喂进来的数据一律忽略；调用方应关闭这条连接。
+     *
+     * @property progress 超时那一刻的收发统计和握手进度（[NearbySession.handshakeProgress]）：
+     *   用来分清「手机一个字节都没发」和「发了只缺某一项」。
      */
-    data object HandshakeTimedOut : NearbyEvent()
+    class HandshakeTimedOut internal constructor(val progress: String) : NearbyEvent() {
+        override fun toString(): String = "HandshakeTimedOut($progress)"
+    }
 
     /** 对端报来了自己的蓝牙地址文本（`AA:BB:CC:DD:EE:FF`）。 */
     class PeerBluetoothAddress internal constructor(val address: String) : NearbyEvent() {

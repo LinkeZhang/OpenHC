@@ -237,7 +237,9 @@ class NearbySessionTest {
         val s = session(FixedSecureRandom(connectIdBytes))
         s.start(1_000)
         assertEquals(emptyList(), s.onTick(5_999))
-        assertEquals(listOf<NearbyAction>(NearbyEvent.HandshakeTimedOut), s.onTick(6_000))
+        val timedOut = s.onTick(6_000).single()
+        assertIs<NearbyEvent.HandshakeTimedOut>(timedOut)
+        assertTrue(timedOut.progress.contains("收到"), timedOut.progress)
         assertNull(s.nextTickAtMillis)
         assertEquals(emptyList(), s.onTick(7_000))
         // 作废后喂数据一律忽略，也不能再回应答。

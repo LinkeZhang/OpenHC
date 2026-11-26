@@ -33,7 +33,9 @@ internal interface WirelessLayers {
 internal sealed class BluetoothOutput {
     class Send(val bytes: ByteArray) : BluetoothOutput()
     class HandshakeCompleted(val encrypted: Boolean) : BluetoothOutput()
-    object HandshakeTimedOut : BluetoothOutput()
+
+    /** 握手超时；[progress] 是超时那一刻的收发统计（诊断用，见 `NearbySession.handshakeProgress`）。 */
+    class HandshakeTimedOut(val progress: String) : BluetoothOutput()
 
     /** 手机请求开子通道；[rfcomm] 为 true 是协议 0 的 RFCOMM 子通道请求。[handle] 回应时原样交回。 */
     class SocketRequest(val businessId: Int, val tag: String, val rfcomm: Boolean, val handle: Any?) : BluetoothOutput() {
@@ -153,7 +155,7 @@ internal class BluetoothNearbyAdapter(private val session: NearbySession) : Blue
         when (action) {
             is NearbyAction.Send -> BluetoothOutput.Send(action.frame)
             is NearbyEvent.HandshakeCompleted -> BluetoothOutput.HandshakeCompleted(action.encrypted)
-            NearbyEvent.HandshakeTimedOut -> BluetoothOutput.HandshakeTimedOut
+            is NearbyEvent.HandshakeTimedOut -> BluetoothOutput.HandshakeTimedOut(action.progress)
             is NearbyEvent.SocketRequested ->
                 BluetoothOutput.SocketRequest(action.businessId, action.tag, action.protocol and PROTOCOL_TCP == 0, action)
             is NearbyEvent.DataChannelRequested ->

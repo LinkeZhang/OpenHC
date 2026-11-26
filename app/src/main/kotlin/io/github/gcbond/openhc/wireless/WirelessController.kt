@@ -959,10 +959,10 @@ class WirelessController(
         private val results = RunnerResults()
         val executor = WirelessPlatformExecutor(
             openRfcomm = { name, uuid, events -> RfcommServer(adapter, name, uuid, events, "OpenHC-Rfcomm-$id") },
-            dialRfcomm = { address, uuid, channel, events ->
+            dialRfcomm = { address, uuid, channel, secure, events ->
                 val byChannel = channel.takeUnless { DebugOverrides.forceRfcommSdp }
                 if (channel != null && byChannel == null) Log.i(TAG, "[$id] 调试开关：认证子通道改按 SDP 查")
-                RfcommClient(adapter, address, uuid, events, "OpenHC-Wireless-$id-dial", byChannel)
+                RfcommClient(adapter, address, uuid, events, "OpenHC-Wireless-$id-dial", byChannel, secure)
             },
             // 会话在手机认证通过后才要热点；无线开着时热点已经先开好留着，这里直接接手。之前排的「恢复车机 WiFi」作废。
             startHotspot = { events ->
@@ -1047,7 +1047,11 @@ class WirelessController(
             // DMSDP 层的诊断（手机回了什么、没认出来的消息、SETUP 应答原文）必须落盘：
             // 车机读不到 logcat，只有写进诊断文件用户才能发出来。其它层的诊断量大、多为过程噪声，
             // 仍旧只进 logcat。
-            if (event.layer == SessionLayer.DMSDP) DiagnosticLog.log(TAG, "[${current.id}] $event")
+            // 例外是 NEARBY 层（蓝牙控制通道）：安卓 4.4 车机上出现过「连得上、握手一个字节不回」，
+            // 这一层的收发明细是唯一能分清原因的现场，量也不大（一条连接几行），一起落盘。
+            if (event.layer == SessionLayer.DMSDP || event.layer == SessionLayer.NEARBY) {
+                DiagnosticLog.log(TAG, "[${current.id}] $event")
+            }
         } else {
             Log.i(TAG, "[${current.id}] $event")
             DiagnosticLog.log(TAG, "[${current.id}] $event")

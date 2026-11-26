@@ -1,5 +1,28 @@
 # 更新记录
 
+## 0.2.11-android4（2026-11-26）握手超时不再猜：带上收发统计，并自动换加密链路再试一次
+
+安卓 4.4 车机（系统 19）上的诊断日志显示，车机主动连手机这条路**链路是通的**（连上之后 `PhoneBluetoothConnected`
+都出来了），但连上后 5 秒内手机一个字节都没回，只能报「握手没完成」。这一版针对这个现场做两件事。
+
+**一、握手超时的时候把收发统计写进诊断文件。** 原来只报一句「握手没完成」，看不出是手机没发数据、发了但拼不出帧、
+还是只缺某一项。现在 `NearbySession` 记着收到的字节数和帧数、发出的帧数、握手三要素（版本、摘要、加密）见到了哪些、
+还有多少字节没拼成帧，超时时一起写进结束原因和诊断文件。同时把蓝牙控制通道这一层（`SessionLayer.NEARBY`）的诊断
+也改成落盘——以前只有 DMSDP 层落盘，而这台车机读不到 logcat，这一层的现场以前根本拿不到。
+
+**二、握手超时后自动换加密链路再连一次。** 车机主动回连原来一律用不加密的 RFCOMM 链路
+（`createInsecureRfcommSocketToServiceRecord`）。安卓 5.1 车机上手机接受的就是它，但安卓 4.4 车机上
+「连得上、一个字节不回」很像手机那边只认加密链路：不加密的链路上它不会回任何东西，而链路本身是通的，
+所以只会表现成握手超时。现在握手超时后先关掉这条，改用加密链路（`createRfcommSocketToServiceRecord`）重连一次，
+仍然不成才结束，结束原因里会写清是哪一种链路、收发统计是什么。手机连上来的方向不重试（那条本来就是手机的加密链路）。
+
+- core:nearby：`NearbySession.handshakeProgress`（收发字节/帧数 + 握手三要素进度），`HandshakeTimedOut` 带上它。
+- core:session：`WirelessAction.ConnectRfcomm.secure`；车机主动回连握手超时后改走加密链路重试一次（只试一次）；
+  `WirelessReceiverSession` 在连上控制通道、握手超时时各记一条 NEARBY 层诊断。
+- platform：`RfcommClient` 新增 `secure` 参数，按 SDP 连时选加密或不加密的 socket。
+- app：`WirelessController` 把 NEARBY 层的诊断也写进诊断文件。
+- 版本号 40211 / 0.2.11-android4。
+
 ## 0.2.10-android4（2026-11-25）回连被拒后车机主动重问，界面不再谎称「手机弹了确认框」
 
 安卓 5.1 车机上实测发现两件事，这一版都修掉。

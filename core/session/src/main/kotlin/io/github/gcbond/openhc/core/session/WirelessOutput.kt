@@ -72,8 +72,15 @@ sealed class WirelessAction : WirelessOutput {
         val address: String,
         val uuid: UUID,
         val rfcommChannel: Int?,
+        /**
+         * 要不要加密链路。默认不加密：实车（安卓 5.1 车机）上手机接受的就是不加密链路。
+         * 安卓 4.4 车机上出现过「连得上、手机一个字节不回」，怀疑手机要求加密链路，
+         * 所以控制通道握手超时后会话会改用加密链路再连一次（[secure] = true）。
+         */
+        val secure: Boolean = false,
     ) : WirelessAction() {
-        override fun toString() = "ConnectRfcomm(${channel.label}, ${rfcommChannel?.let { "通道 $it" } ?: "按 SDP"}，地址不显示)"
+        override fun toString() =
+            "ConnectRfcomm(${channel.label}, ${rfcommChannel?.let { "通道 $it" } ?: "按 SDP"}${if (secure) "，加密链路" else ""}，地址不显示)"
     }
 
     class RfcommWrite(override val id: Int, val bytes: ByteArray) : WirelessAction() {

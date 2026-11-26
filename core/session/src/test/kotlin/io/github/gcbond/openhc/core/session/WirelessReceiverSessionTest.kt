@@ -86,7 +86,8 @@ class WirelessReceiverSessionTest {
                 is SessionEvent -> "event $c"
             }
             is WirelessAction.ListenRfcomm -> "rfcomm-listen ${o.channel} ${o.uuid}"
-            is WirelessAction.ConnectRfcomm -> "rfcomm-connect ${o.channel} ${o.uuid} ${o.rfcommChannel?.let { "通道 $it" } ?: "按 SDP"}"
+            is WirelessAction.ConnectRfcomm ->
+                "rfcomm-connect ${o.channel} ${o.uuid} ${o.rfcommChannel?.let { "通道 $it" } ?: "按 SDP"}${if (o.secure) " 加密" else ""}"
             is WirelessAction.RfcommWrite -> "rfcomm-write ${names[o.id]} ${o.bytes.text()}"
             is WirelessAction.RfcommClose -> "rfcomm-close ${names[o.id]}"
             is WirelessAction.StartWifiNetwork -> "wifi-start"
@@ -616,10 +617,12 @@ class WirelessReceiverSessionTest {
         d.start()
         d.connectBluetooth()
         d.layers.bluetooth.nextTickAtMillis = 6_000
-        d.layers.bluetooth.onTickHandler = { now -> if (now >= 6_000) listOf(BluetoothOutput.HandshakeTimedOut) else emptyList() }
+        d.layers.bluetooth.onTickHandler = { now ->
+            if (now >= 6_000) listOf(BluetoothOutput.HandshakeTimedOut("收到 0 字节 / 0 帧")) else emptyList()
+        }
         assertEquals(6_000L, d.session.nextTickAtMillis)
         d.tick(6_000)
-        assertEquals("蓝牙控制通道失败（连上后 5 秒内握手没完成）", d.ended().toString())
+        assertEquals("蓝牙控制通道失败（连上后 5 秒内握手没完成（收到 0 字节 / 0 帧））", d.ended().toString())
     }
 
     @Test
@@ -756,7 +759,7 @@ class WirelessReceiverSessionTest {
         assertTrue(d.outputs.none { it is WirelessEvent.PairingReady })
         // 连上后车机当握手发起方。
         assertEquals(
-            listOf("event PhoneBluetoothConnected(地址不显示)", "rfcomm-write BLUETOOTH_CONTROL bt-connect-id"),
+            listOf("diag", "event PhoneBluetoothConnected(地址不显示)", "rfcomm-write BLUETOOTH_CONTROL bt-connect-id"),
             d.btConnected(WirelessChannel.BLUETOOTH_CONTROL),
         )
         assertTrue("bt.create(发起方)" in d.layers.calls)
@@ -792,6 +795,49 @@ class WirelessReceiverSessionTest {
         )
         assertNull(d.session.nextTickAtMillis?.takeIf { it < d.now + d.config.timeouts.networkStartMillis - 1 })
         assertTrue(d.outputs.none { it is WirelessEvent.Ended })
+    }
+
+    @Test
+    fun reconnectHandshakeTimeoutRetriesOnSecureLink() {
+        val d = Driver()
+        d.startReconnect()
+        d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
+        d.layers.bluetooth.nextTickAtMillis = 6_000
+        d.layers.bluetooth.onTickHandler = { now ->
+            if (now >= 6_000) listOf(BluetoothOutput.HandshakeTimedOut("收到 0 字节 / 0 帧，握手还缺 版本、摘要、加密")) else emptyList()
+        }
+        // 不加密链路上握手没成：不结束，改走加密链路再连一次（换一个新 id，旧的先关掉）。
+        assertEquals(
+            listOf("diag", "rfcomm-close BLUETOOTH_CONTROL", "rfcomm-connect BLUETOOTH_CONTROL $controlUuid 按 SDP 加密"),
+            d.tick(6_000),
+        )
+        assertTrue(d.outputs.none { it is WirelessEvent.Ended })
+        // 加密链路也连上了，仍然没有握手：这一次直接结束，不再重试，原因里带上收发统计。
+        d.btConnected(WirelessChannel.BLUETOOTH_CONTROL)
+        d.tick(12_000)
+        assertEquals(
+            "蓝牙控制通道失败（连上后 5 秒内握手没完成（收到 0 字节 / 0 帧，握手还缺 版本、摘要、加密））",
+            d.ended().toString(),
+        )
+    }
+
+    @Test
+    fun scanHandshakeTimeoutDoesNotRetryOnSecureLink() {
+        // 手机连上来的方向本来就走手机的加密链路，没有「换一种链路」可换：直接结束，不重连。
+        val d = Driver()
+        d.start()
+        d.connectBluetooth()
+        d.layers.bluetooth.nextTickAtMillis = 6_000
+        d.layers.bluetooth.onTickHandler = { now ->
+            if (now >= 6_000) listOf(BluetoothOutput.HandshakeTimedOut("收到 0 字节 / 0 帧")) else emptyList()
+        }
+        assertEquals(
+            listOf(
+                "diag", "rfcomm-close BLUETOOTH_CONTROL", "rfcomm-close BLUETOOTH_CONTROL.listener",
+                "event Ended(蓝牙控制通道失败（连上后 5 秒内握手没完成（收到 0 字节 / 0 帧））)",
+            ),
+            d.tick(6_000),
+        )
     }
 
     @Test

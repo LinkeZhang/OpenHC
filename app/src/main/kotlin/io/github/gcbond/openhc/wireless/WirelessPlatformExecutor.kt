@@ -64,8 +64,11 @@ internal class RunnerResults : WirelessResults {
  */
 internal class WirelessPlatformExecutor(
     private val openRfcomm: (serviceName: String, uuid: UUID, events: RfcommEvents) -> RfcommEndpoint,
-    /** 车机主动连手机（车机主动回连）：[channel] 不为 null 时先按通道号直连，否则按 [uuid] 查 SDP。 */
-    private val dialRfcomm: (address: String, uuid: UUID, channel: Int?, events: RfcommClient.Events) -> RfcommEndpoint,
+    /**
+     * 车机主动连手机（车机主动回连）：[channel] 不为 null 时先按通道号直连，否则按 [uuid] 查 SDP；
+     * [secure] 为 true 时走加密链路（默认不加密，只有握手超时后的重试才要）。
+     */
+    private val dialRfcomm: (address: String, uuid: UUID, channel: Int?, secure: Boolean, events: RfcommClient.Events) -> RfcommEndpoint,
     private val startHotspot: (LocalHotspotEvents) -> LocalHotspotHandle,
     private val results: WirelessResults,
     private val onEvent: (WirelessEvent) -> Unit,
@@ -183,7 +186,7 @@ internal class WirelessPlatformExecutor(
 
     private fun dial(action: WirelessAction.ConnectRfcomm) {
         val label = action.channel.label
-        val how = action.rfcommChannel?.let { "通道 $it" } ?: "按 SDP 查 ${action.uuid}"
+        val how = (action.rfcommChannel?.let { "通道 $it" } ?: "按 SDP 查 ${action.uuid}") + if (action.secure) "，加密链路" else ""
         log("$label：车机去连手机（${MacText.mask(action.address)}，$how）")
         val events = object : RfcommClient.Events {
             override fun onConnected() = ifConnected(action.id) {
@@ -210,7 +213,7 @@ internal class WirelessPlatformExecutor(
 
             override fun onNote(message: String) = ifConnected(action.id) { log("$label：$message") }
         }
-        val endpoint = dialRfcomm(action.address, action.uuid, action.rfcommChannel, events)
+        val endpoint = dialRfcomm(action.address, action.uuid, action.rfcommChannel, action.secure, events)
         synchronized(lock) {
             if (!closed) connections[action.id] = endpoint
         }

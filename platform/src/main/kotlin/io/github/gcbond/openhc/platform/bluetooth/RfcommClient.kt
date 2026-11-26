@@ -31,6 +31,11 @@ class RfcommClient(
     private val events: Events,
     private val threadName: String = "OpenHC-RfcommClient",
     private val channel: Int? = null,
+    /**
+     * 要加密链路（链路层加密 + 认证）。默认不加密：安卓 5.1 车机上手机接受的是不加密链路。
+     * 安卓 4.4 车机上出现过「连得上、手机一个字节不回」，怀疑手机那边要求加密，这时用 [secure] = true 再试。
+     */
+    private val secure: Boolean = false,
 ) : RfcommEndpoint {
 
     /** 主动连接的事件，在连接线程上按顺序回调，回调里不要阻塞。 */
@@ -112,7 +117,7 @@ class RfcommClient(
             // 安卓 12 起停扫描要扫描权限；没有就不停，只是连得慢些。
         }
         val client = try {
-            openByChannel(device) ?: device.createInsecureRfcommSocketToServiceRecord(uuid)
+            openByChannel(device) ?: openBySdp(device)
         } catch (e: IOException) {
             return failConnect("建 socket 失败：${describe(e)}")
         } catch (e: SecurityException) {
@@ -142,8 +147,8 @@ class RfcommClient(
     private fun openByChannel(device: BluetoothDevice): BluetoothSocket? {
         val ch = channel ?: return null
         return try {
-            val method = BluetoothDevice::class.java.getMethod("createInsecureRfcommSocket", Int::class.javaPrimitiveType)
-            (method.invoke(device, ch) as BluetoothSocket).also { note("按通道号 $ch 直连") }
+            val method = BluetoothDevice::class.java.getMethod(METHOD_BY_CHANNEL, Int::class.javaPrimitiveType)
+            (method.invoke(device, ch) as BluetoothSocket).also { note("按通道号 $ch 直连${linkText()}") }
         } catch (e: Exception) {
             note("按通道号直连的系统接口用不了（${describe(e)}），改按 SDP 查 $uuid")
             null
@@ -152,6 +157,22 @@ class RfcommClient(
             null
         }
     }
+
+    /**
+     * 按 [uuid] 查手机的 SDP 记录再连。
+     *
+     * 加密和不加密是两条不同的路：不加密的 `createInsecureRfcommSocketToServiceRecord` 不会要求链路加密，
+     * 手机上如果只接受加密链路，就会出现「连得上但一个字节不回」。
+     */
+    private fun openBySdp(device: BluetoothDevice): BluetoothSocket =
+        if (secure) {
+            note("按 SDP 查 $uuid，走加密链路")
+            device.createRfcommSocketToServiceRecord(uuid)
+        } else {
+            device.createInsecureRfcommSocketToServiceRecord(uuid)
+        }
+
+    private fun linkText() = if (secure) "（加密链路）" else ""
 
     private fun readLoop(client: BluetoothSocket) {
         val buffer = ByteArray(READ_BUFFER_BYTES)
@@ -207,6 +228,9 @@ class RfcommClient(
         const val LINGER_MS = 200L
         const val READ_BUFFER_BYTES = 4096
         const val PEER_CLOSED_TEXT = "read return: -1"
+
+        /** 按通道号直连的隐藏接口。安卓 4.4 起一直是这个名字；安卓 12 换成 createRfcommSocket(int)。 */
+        const val METHOD_BY_CHANNEL = "createInsecureRfcommSocket"
 
         fun daemon(name: String, body: () -> Unit) {
             val t = Thread(body, name)

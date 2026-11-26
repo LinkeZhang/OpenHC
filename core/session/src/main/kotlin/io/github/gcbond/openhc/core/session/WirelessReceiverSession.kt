@@ -142,6 +142,9 @@ class WirelessReceiverSession internal constructor(
     /** 主动回连：已经因为手机要求输码把连接码显示过一次了（手机重发握手不再重复提示）。 */
     private var pinCodeShown = false
 
+    /** 主动回连：不加密链路上握手没成之后，已经改用加密链路重连过一次了（只试一次）。 */
+    private var secureRetried = false
+
     /** 等认证子通道监听开好的请求。 */
     private val pendingAuthRequests = ArrayList<BluetoothOutput.SocketRequest>()
 
@@ -308,6 +311,7 @@ class WirelessReceiverSession internal constructor(
         ep.state = State.OPEN
         when (ep) {
             control -> {
+                diag(SessionLayer.NEARBY, "车机连上手机的蓝牙控制通道（${if (secureRetried) "加密" else "不加密"}链路），开始握手", out)
                 out.add(WirelessEvent.PhoneBluetoothConnected(target.address))
                 val layer = layers.bluetoothNearby(initiator = true)
                 nearby = layer
@@ -495,10 +499,7 @@ class WirelessReceiverSession internal constructor(
                     out.add(WirelessEvent.BluetoothHandshakeCompleted(o.encrypted))
                     if (reconnect != null) requestAuthChannel(nowMillis, out)
                 }
-                BluetoothOutput.HandshakeTimedOut -> finish(
-                    WirelessEndReason.Failed(WirelessStep.BLUETOOTH, "连上后 ${NearbySession.HANDSHAKE_TIMEOUT_MILLIS / 1000} 秒内握手没完成"),
-                    nowMillis, out,
-                )
+                is BluetoothOutput.HandshakeTimedOut -> onHandshakeTimedOut(o, nowMillis, out)
                 is BluetoothOutput.SocketRequest -> onSocketRequest(o, nowMillis, out)
                 is BluetoothOutput.DataChannelRequest -> onDataChannelRequest(o, nowMillis, out)
                 is BluetoothOutput.DataChannelResult -> onDataChannelResult(o, nowMillis, out)
@@ -510,6 +511,44 @@ class WirelessReceiverSession internal constructor(
                 is BluetoothOutput.Note -> diag(SessionLayer.NEARBY, o.text, out)
             }
         }
+    }
+
+    /**
+     * 蓝牙控制通道握手超时。
+     *
+     * 车机主动回连时先试不加密链路（安卓 5.1 车机上手机接受的就是它）。安卓 4.4 车机上出现过
+     * 「连得上、手机一个字节不回」：手机那边如果只认加密链路，不加密的链路上它不会回任何东西，
+     * 而链路本身是通的，所以只会表现成握手超时。这种情况改用加密链路再连一次（只试一次），
+     * 仍然不成才结束——两种链路各试一遍，用户拿到的诊断日志里也能看出是哪一种没通。
+     */
+    private fun onHandshakeTimedOut(timeout: BluetoothOutput.HandshakeTimedOut, nowMillis: Long, out: Out) {
+        val target = reconnect
+        val secure = !secureRetried && target != null
+        diag(
+            SessionLayer.NEARBY,
+            "蓝牙控制通道握手超时（${if (secure) "不加密" else "加密"}链路）：${timeout.progress}" +
+                if (secure) "，改用加密链路再连一次" else "",
+            out,
+        )
+        if (secure) {
+            secureRetried = true
+            close(control, out)
+            val ep = newEndpoint(WirelessChannel.BLUETOOTH_CONTROL, listener = false)
+            control = ep
+            out.add(
+                WirelessAction.ConnectRfcomm(
+                    ep.id, WirelessChannel.BLUETOOTH_CONTROL, target.address, NearbySession.BLUETOOTH_SERVICE_UUID, null, secure = true,
+                ),
+            )
+            return
+        }
+        finish(
+            WirelessEndReason.Failed(
+                WirelessStep.BLUETOOTH,
+                "连上后 ${NearbySession.HANDSHAKE_TIMEOUT_MILLIS / 1000} 秒内握手没完成（${timeout.progress}）",
+            ),
+            nowMillis, out,
+        )
     }
 
     /**

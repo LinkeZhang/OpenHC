@@ -618,9 +618,9 @@ class ReceiverSessionTest {
     fun controlHandshakeTimeoutEnds() {
         val d = Driver()
         d.toControl()
-        d.layers.nearby.onTickHandler = { listOf(NearbyOutput.HandshakeTimedOut) }
+        d.layers.nearby.onTickHandler = { listOf(NearbyOutput.HandshakeTimedOut("收到 0 字节 / 0 帧")) }
         assertEquals(
-            listOf("close CONTROL", "close CONTROL.listener", "event Ended(控制通道握手超时)"),
+            listOf("diag", "close CONTROL", "close CONTROL.listener", "event Ended(控制通道握手超时)"),
             d.tick(6_000),
         )
     }

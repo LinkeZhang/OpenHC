@@ -446,7 +446,11 @@ class ReceiverSession internal constructor(
             when (o) {
                 is NearbyOutput.Send -> write(control, o.bytes, out)
                 is NearbyOutput.HandshakeCompleted -> out.add(SessionEvent.ControlHandshakeCompleted(o.encrypted))
-                NearbyOutput.HandshakeTimedOut -> finish(EndReason.ControlHandshakeTimeout, out)
+                is NearbyOutput.HandshakeTimedOut -> {
+                    // 车机读不到 logcat：超时前先把收发统计写进诊断文件，否则事后分不清是手机没发还是发坏了。
+                    diag(SessionLayer.NEARBY, "控制通道握手超时：${o.progress}", out)
+                    finish(EndReason.ControlHandshakeTimeout, out)
+                }
                 is NearbyOutput.SocketRequest -> onSocketRequest(o, out)
                 is NearbyOutput.Note -> diag(SessionLayer.NEARBY, o.text, out)
             }

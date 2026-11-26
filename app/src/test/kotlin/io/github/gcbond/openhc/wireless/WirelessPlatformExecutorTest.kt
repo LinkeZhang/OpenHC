@@ -123,7 +123,7 @@ class WirelessPlatformExecutorTest {
         val logs = ArrayList<String>()
         val executor = WirelessPlatformExecutor(
             openRfcomm = { name, uuid, events -> FakeEndpoint(name, uuid, events).also { endpoints += it } },
-            dialRfcomm = { address, uuid, channel, events -> FakeDial(address, uuid, channel, events).also { dials += it } },
+            dialRfcomm = { address, uuid, channel, secure, events -> FakeDial(address, uuid, channel, events).also { dials += it } },
             startHotspot = { events -> FakeHotspot(events).also { hotspots += it } },
             results = results,
             onEvent = { events += it },

@@ -43,7 +43,9 @@ internal interface Layers {
 internal sealed class NearbyOutput {
     class Send(val bytes: ByteArray) : NearbyOutput()
     class HandshakeCompleted(val encrypted: Boolean) : NearbyOutput()
-    object HandshakeTimedOut : NearbyOutput()
+
+    /** 握手超时；[progress] 是超时那一刻的收发统计（诊断用，见 `NearbySession.handshakeProgress`）。 */
+    class HandshakeTimedOut(val progress: String) : NearbyOutput()
 
     /** 手机请求为某项业务新开 TCP；[handle] 是正式实现里原来的事件，回应时原样交回。 */
     class SocketRequest(val businessId: Int, val channel: Int, val tag: String, val handle: Any?) : NearbyOutput() {
@@ -194,7 +196,7 @@ internal class NearbyAdapter(private val session: NearbySession) : NearbyLayer {
         when (action) {
             is NearbyAction.Send -> NearbyOutput.Send(action.frame)
             is NearbyEvent.HandshakeCompleted -> NearbyOutput.HandshakeCompleted(action.encrypted)
-            NearbyEvent.HandshakeTimedOut -> NearbyOutput.HandshakeTimedOut
+            is NearbyEvent.HandshakeTimedOut -> NearbyOutput.HandshakeTimedOut(action.progress)
             is NearbyEvent.SocketRequested ->
                 NearbyOutput.SocketRequest(action.businessId, action.channel, action.tag, action)
             // 其余事件（对端蓝牙地址、自动拒绝、未处理条目、丢弃的数据）的 toString 都不含设备标识。
