@@ -46,6 +46,13 @@ internal object Glyphs {
         )
     }
     val Document by lazy { stroke("document", "M14 2H6v20h12V6z M14 2v4h4 M8 13h8 M8 17h5") }
+    /** 两个箭头反向绕一圈：在两种无线方式之间换。 */
+    val Swap by lazy {
+        stroke(
+            "swap",
+            "M17 3l3 3-3 3 M20 6H8a4 4 0 0 0-4 4v1 M7 21l-3-3 3-3 M4 18h12a4 4 0 0 0 4-4v-1",
+        )
+    }
 
     private fun stroke(name: String, path: String): ImageVector =
         ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)

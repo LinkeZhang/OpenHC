@@ -31,6 +31,22 @@ object MacText {
     }
 
     /**
+     * 这个地址像不像「网卡没烧录 MAC，芯片给的默认值」。用于热点 BSSID 的自检。
+     *
+     * 判定：前两个字节都是 0。IEEE 给厂商的 OUI 里 00-00-xx 这一段几乎不用（00-00-00 保留），
+     * 而没烧录的 WiFi 芯片常见输出就是 `00:00:xx:xx:xx:xx`。
+     * 2026-11-28 TNT go（安卓 9，Amlogic 方案）实测热点 BSSID 是 `00:00:8c:2b:4e:2c`：
+     * 手机按 BSSID 找网，见到这个值直接把连接串丢掉——不关联、不发 probe、连一个包都没有。
+     * 那种情况下开热点这条路走不通，要改用 WiFi 直连（直连的组主 MAC 由系统分配，是合法地址）。
+     *
+     * 传 null 或格式不对时返回 false（交给别的检查去报）。
+     */
+    fun looksUnburned(mac: String?): Boolean {
+        val m = normalize(mac) ?: return false
+        return m.startsWith("00:00:")
+    }
+
+    /**
      * 从网卡的 IPv6 链路本地地址反推网卡 MAC（[address] 是 16 字节地址）。按 EUI-64 生成的链路本地地址是
      * `fe80::` 前缀 + MAC 前 3 字节（第一字节第 2 位取反）+ `ff:fe` + MAC 后 3 字节；不是 `fe80::/64`、中间不是
      * `ff:fe`（例如按隐私规则随机生成的）就推不出，返回 null。结果再按 [of] 过滤。

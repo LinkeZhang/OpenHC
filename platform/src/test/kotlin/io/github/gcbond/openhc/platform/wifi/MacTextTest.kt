@@ -52,4 +52,23 @@ class MacTextTest {
         assertEquals("**", MacText.mask("garbage"))
         assertEquals("(无)", MacText.mask(null))
     }
+
+    /**
+     * 网卡没烧录 MAC 时芯片给 00:00:xx 这种默认值：手机见到就丢弃连接串（2026-11 TNT go 实测
+     * `00:00:8c:2b:4e:2c`）。这种地址要能被认出来，好自动改用 WiFi 直连。
+     */
+    @Test
+    fun unburnedAddressesAreRecognized() {
+        assertEquals(true, MacText.looksUnburned("00:00:8c:2b:4e:2c"), "实测的那个热点 BSSID")
+        assertEquals(true, MacText.looksUnburned("00:00:11:22:33:44"))
+        assertEquals(true, MacText.looksUnburned("00-00-11-22-33-44"), "大写、短横线也认")
+
+        assertEquals(false, MacText.looksUnburned("02:1a:2b:3c:4d:5e"), "直连网卡的本地管理地址是合法的")
+        assertEquals(false, MacText.looksUnburned("00:1a:2b:3c:4d:5e"), "只有第一个字节是 0：正常厂商地址")
+        assertEquals(false, MacText.looksUnburned("00:0c:29:aa:bb:cc"), "VMware 的 OUI")
+        assertEquals(false, MacText.looksUnburned("ac:de:48:00:11:22"))
+
+        assertEquals(false, MacText.looksUnburned(null), "读不到地址不在这里报")
+        assertEquals(false, MacText.looksUnburned("garbage"), "格式不对不在这里报")
+    }
 }

@@ -1,7 +1,9 @@
 package io.github.gcbond.openhc.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -16,16 +18,22 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,6 +41,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import io.github.gcbond.openhc.BuildConfig
@@ -85,6 +96,14 @@ internal fun HomeScreen(
     val identityLoaded = identity is IdentityLoader.Result.Loaded
     // 设置是在设置页里改的，回到首页时首页重新组合，这里每次读到的都是新值。
     val wiredOnly = prefs.wiredOnly
+    // 快捷切换改了无线方式要马上反映到界面上，所以用可观察状态兜一份（prefs 本身不是可观察的）；
+    // 「车机自带热点」只能在设置页改，回到首页会重新组合，直接读就行。
+    var wifiDirect by remember { mutableStateOf(prefs.wifiDirect) }
+    val carHotspot = prefs.carHotspot
+    val onModeSwitch: (Boolean) -> Unit = { wantDirect ->
+        prefs.wifiDirect = wantDirect
+        wifiDirect = wantDirect
+    }
     val wiredState = wired.withoutIdentityNotice()
     BoxWithConstraints(
         Modifier
@@ -117,6 +136,9 @@ internal fun HomeScreen(
                     actions,
                     wirelessActions,
                     onShowProjection,
+                    wifiDirect = wifiDirect,
+                    carHotspot = carHotspot,
+                    onModeSwitch = onModeSwitch,
                     fillHeight = fill,
                     wide = wide,
                     modifier = (if (fill) Modifier.weight(1f) else Modifier)
@@ -155,6 +177,9 @@ private fun ConnectCard(
     actions: HomeActions,
     wirelessActions: WirelessActions,
     onShowProjection: () -> Unit,
+    wifiDirect: Boolean,
+    carHotspot: Boolean,
+    onModeSwitch: (Boolean) -> Unit,
     fillHeight: Boolean,
     wide: Boolean,
     modifier: Modifier,
@@ -187,8 +212,17 @@ private fun ConnectCard(
             }
             else -> Hero(
                 fillHeight,
-                top = { Ways(wiredOnly, wide) },
-                body = { IdleLines(wireless, wiredOnly) },
+                top = {
+                    Ways(
+                        wiredOnly = wiredOnly,
+                        wide = wide,
+                        wifiDirect = wifiDirect,
+                        // 「车机自带热点」是车主自己配的，别让一键切换把它顶掉。
+                        showScanSwitch = !wiredOnly && !carHotspot,
+                        onSwitchScan = { onModeSwitch(!wifiDirect) },
+                    )
+                },
+                body = { IdleLines(wireless, wiredOnly, wifiDirect, carHotspot) },
                 buttons = { IdleButtons(wired, wireless, identityLoaded, wiredOnly, actions, wirelessActions) },
                 buttonsFirst = true,
             )
@@ -268,11 +302,36 @@ private fun StatusHead(glyph: ImageVector, title: String, titleColor: Color) {
     )
 }
 
-/** 空闲：两种连法并排（窄屏上下排；开着「只用数据线连接」时只有插线）。 */
+/**
+ * 空闲：两种连法并排（窄屏上下排；开着「只用数据线连接」时只有插线）。
+ * 扫码那张卡片右上角有个切换图标，点一下在「车机开热点」和「5 GHz 直连」之间换，只换标题；
+ * 卡片里的说明两种模式共用一条，切换后卡片高度不会变，模式相关的提示放在卡片下方。
+ */
 @Composable
-private fun Ways(wiredOnly: Boolean, wide: Boolean) {
+private fun Ways(
+    wiredOnly: Boolean,
+    wide: Boolean,
+    wifiDirect: Boolean,
+    showScanSwitch: Boolean,
+    onSwitchScan: () -> Unit,
+) {
     val scan: @Composable (Modifier) -> Unit = { m ->
-        WayTile(Glyphs.Wifi, stringResource(R.string.home_way_scan_title), stringResource(R.string.home_way_scan_text), m)
+        WayTile(
+            glyph = Glyphs.Wifi,
+            title = stringResource(if (wifiDirect) R.string.home_scan_title_direct else R.string.home_scan_title_hotspot),
+            text = stringResource(R.string.home_scan_text),
+            modifier = m,
+            switch = if (showScanSwitch) {
+                {
+                    ScanModeSwitch(
+                        direct = wifiDirect,
+                        onSwitch = onSwitchScan,
+                    )
+                }
+            } else {
+                null
+            },
+        )
     }
     val cable: @Composable (Modifier) -> Unit = { m ->
         WayTile(
@@ -300,41 +359,87 @@ private fun Ways(wiredOnly: Boolean, wide: Boolean) {
 
 private val WAY_TILE_MAX = 380.dp
 
-/** 一种连法：上面大图标，下面名称和一句话，居中。 */
+/**
+ * 一种连法：上面大图标，下面名称和一句话，居中。[switch] 不为空时摆在卡片右上角
+ * （扫码那张卡片用它切换热点 / 直连），点它不会触发卡片本身的其他行为。
+ */
 @Composable
-private fun WayTile(glyph: ImageVector, title: String, text: String, modifier: Modifier) {
+private fun WayTile(
+    glyph: ImageVector,
+    title: String,
+    text: String,
+    modifier: Modifier,
+    switch: (@Composable () -> Unit)? = null,
+) {
     val compact = LocalCompact.current
-    Column(
+    Box(
         modifier
             .clip(RoundedCornerShape(18.dp))
-            .background(Palette.SegmentBackground)
-            .padding(horizontal = 20.dp, vertical = if (compact) 16.dp else 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .background(Palette.SegmentBackground),
     ) {
-        IconTile(glyph, large = true)
-        Text(
-            title,
-            style = UiType.cardTitle(compact).copy(fontSize = UiType.rowTitle(compact).fontSize * 1.15f),
-            color = Palette.Text,
-            modifier = Modifier.padding(top = if (compact) 10.dp else 14.dp),
-        )
-        Text(
-            text,
-            style = UiType.rowSummary(compact),
-            color = Palette.Muted,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 4.dp),
-        )
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = if (compact) 16.dp else 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            IconTile(glyph, large = true)
+            Text(
+                title,
+                style = UiType.cardTitle(compact).copy(fontSize = UiType.rowTitle(compact).fontSize * 1.15f),
+                color = Palette.Text,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = if (compact) 10.dp else 14.dp),
+            )
+            Text(
+                text,
+                style = UiType.rowSummary(compact),
+                color = Palette.Muted,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+        if (switch != null) {
+            Box(Modifier.align(Alignment.TopEnd).padding(if (compact) 8.dp else 10.dp)) { switch() }
+        }
     }
 }
 
-/** 空闲时的小字：车机蓝牙和无线方式（或只用数据线），自动连接的情况（只是说明的那些）。要处理的事在上方提示条里。 */
+/** 扫码卡片右上角的切换：一个圈起来的互换图标，点了在热点 / 直连之间换。 */
 @Composable
-private fun IdleLines(wireless: WirelessUiState, wiredOnly: Boolean) {
+private fun ScanModeSwitch(direct: Boolean, onSwitch: () -> Unit) {
+    val compact = LocalCompact.current
+    val label = stringResource(if (direct) R.string.home_scan_switch_to_hotspot else R.string.home_scan_switch_to_direct)
+    Box(
+        Modifier
+            .size(if (compact) 40.dp else 44.dp)
+            .clip(CircleShape)
+            .background(Palette.Tint)
+            .clickable(role = Role.Button, onClickLabel = label, onClick = onSwitch)
+            .semantics { contentDescription = label }
+            .padding(if (compact) 9.dp else 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(Glyphs.Swap, contentDescription = null, tint = Palette.Accent, modifier = Modifier.fillMaxSize())
+    }
+}
+
+/**
+ * 空闲时的小字：车机蓝牙和无线方式（或只用数据线），自动连接的情况（只是说明的那些）。要处理的事在上方提示条里。
+ * 扫码卡片有切换（热点 / 直连）时，在这里补一句这个模式适合谁：热点模式下用琥珀色提醒鸿蒙 2.0 的手机只能用直连。
+ */
+@Composable
+private fun IdleLines(wireless: WirelessUiState, wiredOnly: Boolean, wifiDirect: Boolean, carHotspot: Boolean) {
     if (wiredOnly) {
         Line(stringResource(R.string.home_connect_wired_only_note), Palette.Muted)
     } else {
-        Line(stringResource(R.string.wireless_tagline) + " " + wirelessNetworkText(wireless), Palette.Muted)
+        Line(stringResource(R.string.wireless_tagline) + " " + wirelessNetworkText(wireless, wifiDirect), Palette.Muted)
+        if (!carHotspot) {
+            Line(
+                stringResource(if (wifiDirect) R.string.home_scan_direct_note else R.string.home_scan_hotspot_note),
+                if (wifiDirect) Palette.Muted else Palette.Warn,
+            )
+        }
         WirelessIdleLines(wireless)
     }
 }

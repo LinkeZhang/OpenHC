@@ -25,6 +25,15 @@
     <string name="wireless_network_line_car">方式：车机自带热点（车机热点要开着）</string>
     <string name="wireless_network_line_car_auto">方式：车机自带热点（连接时自动打开）</string>
     <string name="wireless_network_line_direct">方式：5 GHz 直连（车机 WiFi 要开着）</string>
+    <!-- 首页「扫码连接」卡片右上角的切换：点一下在这两种方式之间换，卡片标题跟着变；
+         卡片里的说明两种模式共用一条（免得切换后卡片高度变），模式相关的提示放在卡片下方 -->
+    <string name="home_scan_title_hotspot">扫码连接（热点）</string>
+    <string name="home_scan_title_direct">扫码连接（直连）</string>
+    <string name="home_scan_text">点「开始连接」，用华为手机扫屏幕上的二维码</string>
+    <string name="home_scan_switch_to_direct">切换到 WiFi 直连</string>
+    <string name="home_scan_switch_to_hotspot">切换回车机开热点</string>
+    <string name="home_scan_hotspot_note">鸿蒙 2.0 的手机（HiCar 13 / 14）只能用直连模式，连不上就点右上角切过去。</string>
+    <string name="home_scan_direct_note">鸿蒙 2.0 的手机用这个模式；鸿蒙 NEXT / 4.x 的手机两种都能用，连不上就切回热点。</string>
     <string name="wireless_hint_negotiating_hotspot">认证成功，车机正在开热点，和手机商量 WiFi…</string>
     <string name="wireless_hint_sending_hotspot">车机热点已打开，正在把热点信息发给手机…</string>
     <string name="wireless_hint_waiting_join_hotspot">等手机连上车机热点…（手机开着热点的话会被关掉）</string>

@@ -25,6 +25,12 @@ class LocalHotspot(
     val frequencySource: HotspotFrequencySource,
     val security: HotspotSecurity,
 ) {
+    /**
+     * BSSID 像网卡没烧录 MAC 时芯片给的默认值（见 [MacText.looksUnburned]）：手机很可能见到就丢弃连接串，
+     * 一点反应都没有。这时调用方应改走 WiFi 直连。
+     */
+    val bssidLooksUnburned: Boolean get() = MacText.looksUnburned(bssid)
+
     override fun toString() =
         "LocalHotspot($localIp，$frequencyMhz MHz，网卡 $interfaceName，BSSID ${MacText.mask(bssid)}，" +
             "加密 ${security.label}，网络名与密码不显示)"

@@ -53,13 +53,13 @@ internal fun RestoreWifiSetting() {
 /**
  * 无线连接怎么给手机准备 WiFi 的一句说明：车机开热点（车机原来连着的 WiFi 会断开）、5 GHz 直连，或者车机自带热点。
  * 直连按这次连接实际用的（进行中）或设置（空闲时）；车机自带热点按设置（设置页和首页不同时显示，回到首页时重新组合，
- * 读到的是新值）。
+ * 读到的是新值）。[directOverride] 给首页的快捷切换用：设置不是可观察状态，切换后要立刻反映到这句说明上。
  */
 @Composable
-internal fun wirelessNetworkText(state: WirelessUiState): String {
+internal fun wirelessNetworkText(state: WirelessUiState, directOverride: Boolean? = null): String {
     val context = LocalContext.current
     val prefs = remember(context) { WirelessPreferences(context) }
-    val direct = if (state.active) state.direct else prefs.usesWifiDirect
+    val direct = if (state.active) state.direct else (directOverride ?: prefs.usesWifiDirect)
     return stringResource(
         when {
             direct -> R.string.wireless_network_line_direct

@@ -1008,11 +1008,9 @@ class WirelessController(
                 }
             },
             // 直连：不开热点、不动车机自己的 WiFi，所以也不排「恢复车机 WiFi」。
-            startDirect = if (directGroup) {
-                { events -> WifiDirectGroupOwner(app, events) { Log.i(TAG, "[$id] 直连：$it") } }
-            } else {
-                null
-            },
+            // 直连：不开热点、不动车机自己的 WiFi，所以也不排「恢复车机 WiFi」。
+            directFactory = { events -> WifiDirectGroupOwner(app, events) { Log.i(TAG, "[$id] 直连：$it") } },
+            useDirect = directGroup,
             results = results,
             onEvent = { event -> onWirelessEvent(this, event) },
             log = { Log.i(TAG, "[$id] $it") },

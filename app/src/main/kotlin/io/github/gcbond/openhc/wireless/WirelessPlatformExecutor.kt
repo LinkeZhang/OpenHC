@@ -71,8 +71,10 @@ internal class WirelessPlatformExecutor(
     /** 车机主动连手机（车机主动回连）：[channel] 不为 null 时先按通道号直连，否则按 [uuid] 查 SDP。 */
     private val dialRfcomm: (address: String, uuid: UUID, channel: Int?, events: RfcommClient.Events) -> RfcommEndpoint,
     private val startHotspot: (LocalHotspotEvents) -> LocalHotspotHandle,
-    /** 不为 null 时会话要的网络改建 WiFi 直连组（设置里「无线方式」选了直连）。 */
-    private val startDirect: ((DirectGroupEvents) -> LocalHotspotHandle)? = null,
+    /** 建 WiFi 直连组的工厂（设置里「无线方式」选了直连时用）。 */
+    private val directFactory: ((DirectGroupEvents) -> LocalHotspotHandle)? = null,
+    /** 这次连接直接建直连组（设置里「无线方式」选了直连）。 */
+    private val useDirect: Boolean = false,
     private val results: WirelessResults,
     private val onEvent: (WirelessEvent) -> Unit,
     private val log: (String) -> Unit,
@@ -93,6 +95,13 @@ internal class WirelessPlatformExecutor(
     @Volatile
     private var readyDirect: DirectGroup? = null
 
+    /**
+     * 这次连接最终用的是直连组（设置里选了直连，或热点 BSSID 无效自动切过来的）。
+     * 只用于日志措辞和 [WirelessEvent.ConnectionInfoSent] 的解释。
+     */
+    @Volatile
+    private var isDirectNow = false
+
     /** 桥接的平台回调。 */
     fun execute(output: WirelessOutput) {
         when (output) {
@@ -101,8 +110,8 @@ internal class WirelessPlatformExecutor(
             is WirelessAction.RfcommWrite -> write(output)
             is WirelessAction.RfcommClose -> closeRfcomm(output.id)
             is WirelessAction.StartWifiNetwork -> {
-                val direct = startDirect
-                if (direct != null) startDirectGroup(output.id, direct) else startLocalHotspot(output.id)
+                val direct = directFactory
+                if (useDirect && direct != null) startDirectGroup(output.id, direct) else startLocalHotspot(output.id)
             }
             is WirelessAction.StopWifiNetwork -> stopHotspot(output.id)
             is WirelessEvent -> {
@@ -266,12 +275,23 @@ internal class WirelessPlatformExecutor(
 
     /** 开热点：名称、密码、频率都由系统定，开好后交回实际值（频率多半是推测值）。会话在手机认证通过后才要热点。 */
     private fun startLocalHotspot(id: Int) {
+        val generation = nextGeneration(id)
         val events = object : LocalHotspotEvents {
-            override fun onReady(hotspot: LocalHotspot) = ifHotspot(id) {
+            override fun onReady(hotspot: LocalHotspot) {
+                if (!isCurrentNetwork(id, generation)) return
                 if (!hotspot.frequencySource.verified) {
                     log("热点的频率是推测值（${hotspot.frequencySource.label}）：手机找不到网时先查这个")
                 }
                 if (hotspot.bssidSource == HotspotMacSource.PLACEHOLDER) log("读不到热点网卡的真实 MAC，连接串里的 BSSID 用占位值")
+                // 热点网卡没烧录 MAC 时 BSSID 是 00:00:xx 这种默认值。新 HiCar（鸿蒙 NEXT、4.2）照常能连，
+                // 但老 HiCar（鸿蒙 2.0 / 13.x / 14.2）会静默丢弃连接串——这时建议用户改用 WiFi 直连，只提示不自动切：
+                // 开热点时系统把车机 WiFi 关了，而直连组要求 WiFi 开着，自动切过去必然失败（2026-11-28 实测）。
+                if (hotspot.bssidLooksUnburned) {
+                    log(
+                        "热点 BSSID 是 ${MacText.mask(hotspot.bssid)}（网卡没烧录 MAC 的默认值）：" +
+                            "鸿蒙 2.0 一类老 HiCar 可能连不上，那种情况请在设置里把「无线方式」改成「5 GHz 直连」",
+                    )
+                }
                 readyHotspot = hotspot
                 results.onWifiNetworkReady(
                     id,
@@ -279,9 +299,12 @@ internal class WirelessPlatformExecutor(
                 )
             }
 
-            override fun onFailed(message: String) = ifHotspot(id) { results.onIoError(id, message) }
+            override fun onFailed(message: String) {
+                if (isCurrentNetwork(id, generation)) results.onIoError(id, message)
+            }
 
-            override fun onLost(message: String) = ifHotspot(id) {
+            override fun onLost(message: String) {
+                if (!isCurrentNetwork(id, generation)) return
                 log(message)
                 results.onClosed(id)
             }
@@ -295,14 +318,17 @@ internal class WirelessPlatformExecutor(
 
     private fun stopHotspot(id: Int) {
         val handle = synchronized(lock) { hotspots.remove(id) } ?: return
-        log(if (startDirect != null) "拆掉直连组" else "关掉热点")
+        log(if (isDirectNow) "拆掉直连组" else "关掉热点")
         handle.stop()
     }
 
     /** 建直连组：建好后交回组名、口令、频率（安卓 6～9 上频率是指定的信道）；连接串用直连格式。 */
     private fun startDirectGroup(id: Int, factory: (DirectGroupEvents) -> LocalHotspotHandle) {
+        val generation = nextGeneration(id)
+        isDirectNow = true
         val events = object : DirectGroupEvents {
-            override fun onReady(group: DirectGroup) = ifHotspot(id) {
+            override fun onReady(group: DirectGroup) {
+                if (!isCurrentNetwork(id, generation)) return
                 if (group.macSource == DirectMacSource.PLACEHOLDER) log("读不到直连网卡的真实 MAC，连接串里的组主 MAC 用占位值")
                 readyDirect = group
                 results.onWifiNetworkReady(
@@ -311,9 +337,12 @@ internal class WirelessPlatformExecutor(
                 )
             }
 
-            override fun onFailed(message: String) = ifHotspot(id) { results.onIoError(id, message) }
+            override fun onFailed(message: String) {
+                if (isCurrentNetwork(id, generation)) results.onIoError(id, message)
+            }
 
-            override fun onLost(message: String) = ifHotspot(id) {
+            override fun onLost(message: String) {
+                if (!isCurrentNetwork(id, generation)) return
                 log(message)
                 results.onClosed(id)
             }
@@ -335,8 +364,23 @@ internal class WirelessPlatformExecutor(
         if (synchronized(lock) { connections.containsKey(id) }) block()
     }
 
-    private inline fun ifHotspot(id: Int, block: () -> Unit) {
-        if (synchronized(lock) { hotspots.containsKey(id) }) block()
+    /**
+     * 这一次连接里「建网络」的代次。热点 BSSID 无效要改建直连组时，旧热点的回调（尤其是关它时来的
+     * [LocalHotspotEvents.onLost]）可能比新的直连组回调还晚到；按代次把旧网络迟到的结果全丢掉，
+     * 免得把刚建好的直连组当成「网络没了」而结束整次连接。
+     */
+    private val networkGeneration = HashMap<Int, Int>()
+
+    /** 开始建这一次连接的网络，返回它的代次。 */
+    private fun nextGeneration(id: Int): Int = synchronized(lock) {
+        val next = (networkGeneration[id] ?: 0) + 1
+        networkGeneration[id] = next
+        next
+    }
+
+    /** 这个代次的网络还是当前这个连接在用的网络吗（连接还在、代次没变）。 */
+    private fun isCurrentNetwork(id: Int, generation: Int): Boolean = synchronized(lock) {
+        hotspots.containsKey(id) && networkGeneration[id] == generation
     }
 
     private fun isClosed() = synchronized(lock) { closed }

@@ -860,7 +860,7 @@ private fun PillSwitch(checked: Boolean) {
 
 /** 分段选择：选中的那段蓝底白字，其余是底槽上的普通字。[fill] 为真时各段等宽铺满，否则按字宽。 */
 @Composable
-private fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier, fill: Boolean) {
+internal fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier, fill: Boolean) {
     val compact = LocalCompact.current
     Row(
         modifier
