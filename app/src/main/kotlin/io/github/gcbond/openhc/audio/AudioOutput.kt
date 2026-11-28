@@ -65,6 +65,21 @@ internal class AudioOutput(
      *
      * 数值沿用 android4 分支实测调出来的一套（那边在安卓 5.1 车机上验证过）。
      */
+    /**
+     * 导航播报那一路的播放参数：短缓冲（500/800/1500ms）。
+     *
+     * 导航是一句一句的短音频，用音乐那套厚缓冲会让每句开头缺字。参数来自 android4 分支的实测值。
+     */
+    private val navigationTuning: AudioTuning = AudioTuning(
+        startMillis = 500,
+        targetMillis = 800,
+        maxMillis = 1_500,
+        trackMillis = 150,
+        // 起播窗口内不压回目标：会把刚到的突发削掉，紧接着的低谷没人补。
+        startWindowMillis = 0,
+        trimHoldMillis = 600_000,
+    )
+
     private val videoTuning: AudioTuning = prefs.playbackTuning().let {
         AudioTuning(
             startMillis = 250,
@@ -138,6 +153,8 @@ internal class AudioOutput(
         fun sound(on: Boolean) {
             if (on == sounding || (on && finished)) return
             sounding = on
+            // 导航真的在响时把音乐压低，播报间隙立刻恢复。
+            if (usage == AudioUsage.NAVIGATION) duckForNavigation(on)
             val controller = focusController() ?: return
             if (on) controller.soundStarted(usage) else controller.soundStopped(usage)
         }
@@ -375,11 +392,13 @@ internal class AudioOutput(
         // 纯音乐那套太厚又差一秒。纯听音乐时照旧，无线再多垫一点。
         val videoThin = videoActive && usage == AudioUsage.MEDIA
         val cushioned = wireless && !videoThin && (usage == AudioUsage.MEDIA || usage == AudioUsage.NAVIGATION)
-        val chosen = when {
+        // 导航那一路用短缓冲；其余按视频/音乐两套。
+        val base = when {
+            usage == AudioUsage.NAVIGATION -> navigationTuning
             videoThin -> videoTuning
-            cushioned -> tuning.withCushion(WIRELESS_CUSHION_MILLIS)
             else -> tuning
         }
+        val chosen = if (cushioned) base.withCushion(WIRELESS_CUSHION_MILLIS) else base
         stream.player = AudioPlayer(format, stream, chosen, usage)
         volumes[usage]?.let { stream.player.setVolume(it) }
         streams[key] = stream
@@ -389,6 +408,23 @@ internal class AudioOutput(
                 "（按载荷判断是 ${packet.codec.label}，声明的是 ${info.codec.label}）；${stream.player.tuning}",
         )
         return stream
+    }
+
+    /**
+     * 导航播报时把音乐压低到 [NAVIGATION_DUCK_VOLUME] 倍（乘上焦点给的音量），说完恢复。
+     * 只在这一路真的在响时压；`setVolume` 在全局锁外做，避免与播放器回调形成反向锁序。
+     */
+    private fun duckForNavigation(navigating: Boolean) {
+        val media = synchronized(lock) {
+            streams.values.filter { it.usage == AudioUsage.MEDIA }.map { it to (volumes[it.usage] ?: 1f) }
+        }
+        for ((stream, base) in media) {
+            try {
+                stream.player.setVolume(if (navigating) base * NAVIGATION_DUCK_VOLUME else base)
+            } catch (e: RuntimeException) {
+                // 播放器正在关：设不上无妨。
+            }
+        }
     }
 
     private fun unsupported(stream: AudioStreamInfo, why: String): Stream? {
@@ -417,6 +453,9 @@ internal class AudioOutput(
 
         /** 无线时音乐和导航多攒的毫秒数：车机扫描 WiFi 时投屏信道一次停 0.1～0.3 秒，留点余量。 */
         const val WIRELESS_CUSHION_MILLIS = 300
+
+        /** 导航播报时音乐保留的音量比例（再乘上焦点给的音量）。 */
+        private const val NAVIGATION_DUCK_VOLUME = 0.3f
 
         /** 控制连接上的声音这么久之内收到过，就算还在放。 */
         private const val CONTROL_AUDIO_ACTIVE_MS = 1_500L
