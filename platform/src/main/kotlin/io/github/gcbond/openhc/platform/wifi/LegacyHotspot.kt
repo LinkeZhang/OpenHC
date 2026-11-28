@@ -106,6 +106,16 @@ object LegacyHotspot {
         }
     }
 
+    /** 热点是不是已经开着（`isWifiApEnabled()`；读不到返回 false）。比 [state] 少一层状态码映射。 */
+    fun isEnabled(manager: WifiManager): Boolean = try {
+        val method = WifiManager::class.java.getMethod("isWifiApEnabled")
+        method.invoke(manager) as? Boolean ?: false
+    } catch (e: ReflectiveOperationException) {
+        false
+    } catch (e: RuntimeException) {
+        false
+    }
+
     /** 热点现在的状态（[WifiManager.WIFI_AP_STATE_ENABLED] 等）；读不到返回 -1。 */
     fun state(manager: WifiManager): Int = try {
         val method = WifiManager::class.java.getMethod("getWifiApState")
